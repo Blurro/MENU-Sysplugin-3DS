@@ -1286,6 +1286,7 @@ PLUGIN_RODATA(htps) static const char g_htpsOnlinePath[] = "/luma/plugins/online
 PLUGIN_RODATA(htps) static const char g_htpsChooserTitle[] = "Open Online Menu";
 PLUGIN_RODATA(htps) static const char g_htpsOnlineTitle[] = "Online Menu";
 PLUGIN_RODATA(htps) static const char g_htpsFetchError[] = "Could not read online sources";
+PLUGIN_RODATA(htps) static const char g_htpsNoSources[] = "No sources configured";
 PLUGIN_RODATA(htps) static const char g_htpsOnlineError[] = "Could not load Online Menu";
 PLUGIN_RODATA(htps) static const char g_htpsWaiting[] = "Waiting...";
 PLUGIN_RODATA(htps) static const char g_htpsBack[] = "B: go back";
@@ -1371,13 +1372,14 @@ PLUGIN_CODE(htps) static void PLUGIN_htps_FreeOnlineTransient(HtpsTransientImage
 PLUGIN_CODE(htps) static char *PLUGIN_htps_NextFetchLine(char **cursor)
 {if(!cursor||!*cursor)return NULL;for(;;){while(**cursor=='\r'||**cursor=='\n')(*cursor)++;if(!**cursor)return NULL;char*line=*cursor;while(**cursor&&**cursor!='\r'&&**cursor!='\n')(*cursor)++;if(**cursor)*(*cursor)++=0;while(*line==' '||*line=='\t')line++;char*end=line;while(*end)end++;while(end>line&&(end[-1]==' '||end[-1]=='\t'))*--end=0;if(*line)return line;}}
 PLUGIN_CODE(htps) static bool PLUGIN_htps_LoadFetchSources(u32 *countOut)
-{FS_Archive a=0;Handle f=0;u64 n=0;u32 count=0;bool ok=false;if(!countOut)return false;if(R_FAILED(HTTPS_HOST__FSUSER_OpenArchive(&a,ARCHIVE_SDMC,HTTPS_HOST__fsMakePath(PATH_EMPTY,g_httpsOnlineEmptyPath))))return false;
- if(R_FAILED(HTTPS_HOST__FSUSER_OpenFile(&f,a,HTTPS_HOST__fsMakePath(PATH_ASCII,g_htpsFetchPath),FS_OPEN_READ,0)))goto done;
+{FS_Archive a=0;Handle f=0;u64 n=0;u32 count=0;bool ok=false;Result r;if(!countOut)return false;*countOut=0;if(R_FAILED(HTTPS_HOST__FSUSER_OpenArchive(&a,ARCHIVE_SDMC,HTTPS_HOST__fsMakePath(PATH_EMPTY,g_httpsOnlineEmptyPath))))return false;
+ r=HTTPS_HOST__FSUSER_OpenFile(&f,a,HTTPS_HOST__fsMakePath(PATH_ASCII,g_htpsFetchPath),FS_OPEN_READ,0);
+ if(R_FAILED(r)){r=HTTPS_HOST__FSUSER_OpenFile(&f,a,HTTPS_HOST__fsMakePath(PATH_ASCII,g_htpsFetchPath),FS_OPEN_WRITE|FS_OPEN_CREATE,0);if(R_FAILED(r))goto done;if(R_FAILED(HTTPS_HOST__FSFILE_Close(f))){f=0;goto done;}f=0;r=HTTPS_HOST__FSUSER_OpenFile(&f,a,HTTPS_HOST__fsMakePath(PATH_ASCII,g_htpsFetchPath),FS_OPEN_READ,0);if(R_FAILED(r))goto done;}
  if(R_FAILED(HTTPS_HOST__FSFILE_GetSize(f,&n))||n>=sizeof(g_htpsFetchConfig)||(n&&!PLUGIN_htps_ReadExact(f,0,g_htpsFetchConfig,(u32)n))) goto done;
  g_htpsFetchConfig[(u32)n]=0;
  char*cur=g_htpsFetchConfig;while(count<HTPS_FETCH_MAX_SOURCES){char*t=PLUGIN_htps_NextFetchLine(&cur);if(!t)break;char*u=PLUGIN_htps_NextFetchLine(&cur);if(!u)goto done;g_htpsFetchSources[count].title=t;g_htpsFetchSources[count].url=u;count++;}
  if(PLUGIN_htps_NextFetchLine(&cur)) goto done;
- ok=count!=0; if(ok)*countOut=count;
+ *countOut=count;ok=true;
 done:if(f)HTTPS_HOST__FSFILE_Close(f);if(a)HTTPS_HOST__FSUSER_CloseArchive(a);return ok;}
 PLUGIN_CODE(htps) static bool PLUGIN_htps_SetSourceUrl(const char *url)
 {
@@ -1513,6 +1515,18 @@ PLUGIN_CODE(htps) static void PLUGIN_htps_DrawFetchError(void)
         if (HTTPS_HOST__waitInputWithTimeout(-1) & KEY_B) break;
 }
 
+PLUGIN_CODE(htps) static void PLUGIN_htps_DrawNoSources(void)
+{
+    HTTPS_HOST__Draw_Lock();
+    HTTPS_HOST__Draw_Clear();
+    PLUGIN_htps_DrawChooserFrame();
+    HTTPS_HOST__Draw_String(35, 45, 0x7BEFu, g_htpsNoSources);
+    HTTPS_HOST__Draw_Flush();
+    HTTPS_HOST__Draw_Unlock();
+    while (!*HTTPS_HOST__menuShouldExit)
+        if (HTTPS_HOST__waitInputWithTimeout(-1) & KEY_B) break;
+}
+
 PLUGIN_CODE(htps) static void PLUGIN_htps_DrawOnlineFrame(void)
 {
     HTTPS_HOST__Draw_String(10, 8, 0x435Cu, g_htpsPlus);
@@ -1581,9 +1595,14 @@ PLUGIN_CODE(htps) static void PLUGIN_htps_OpenOnlineMenu(void)
     u32 count = 0, selected = 0, first = 0;
     bool redraw = true;
 
-    if (!PLUGIN_htps_LoadFetchSources(&count) || !count)
+    if (!PLUGIN_htps_LoadFetchSources(&count))
     {
         PLUGIN_htps_DrawFetchError();
+        return;
+    }
+    if (!count)
+    {
+        PLUGIN_htps_DrawNoSources();
         return;
     }
 

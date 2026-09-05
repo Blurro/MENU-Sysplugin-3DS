@@ -13,7 +13,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$SCRIPT_DIR"
 
 # HTTPSLIB transient version. Change this one value when bumping httpslib.
-HTTPSLIB_VERSION=102
+HTTPSLIB_VERSION=104
 
 MAIN_BUILDER="${SCRIPT_DIR}/makeplugin.sh"
 TRANSIENT_TOOL="${SCRIPT_DIR}/sysplugin/make_transient_3on.py"
@@ -146,6 +146,15 @@ PY2
 printf '\n=========================================\n'
 printf '======== Building MENU extras =========\n'
 printf '=========================================\n\n'
+
+# remove leftovers
+rm -f -- \
+    "${SCRIPT_DIR}/sysmodules/rosalina/build/httpslib.o" \
+    "${SCRIPT_DIR}/sysmodules/rosalina/build/httpslib.d" \
+    "${SCRIPT_DIR}/sysmodules/rosalina/build/online.o" \
+    "${SCRIPT_DIR}/sysmodules/rosalina/build/online.d" \
+    "${SCRIPT_DIR}/sysmodules/rosalina/build/modmenu.o" \
+    "${SCRIPT_DIR}/sysmodules/rosalina/build/modmenu.d"
 
 seed_semantic_state
 bash "$TEMP_BUILDER"
