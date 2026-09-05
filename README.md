@@ -9,7 +9,7 @@ For example plugins using it, see [my Sysplugins](https://github.com/Blurro/Blur
 
 ## Building
 
-Build by overlaying Stock Nexus3DS -> 3NX Dev Kit -> This repository, then run:
+Build by overlaying [Stock Nexus3DS](https://github.com/2b-zipper/Nexus3DS/tree/dev) -> [3NX Dev Kit](https://github.com/Blurro/3NX-Plugin-DevKit) -> This repository, then run:
 
 ```text
 ./pre_makeplugin.sh
