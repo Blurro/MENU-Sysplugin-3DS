@@ -298,6 +298,7 @@ typedef struct
     OnlnStackId components[ONLN_PACK_MAX_COMPONENTS];
     u8 descriptionLines;
     u8 componentCount;
+    bool outputComplete;
 } OnlnPack;
 
 typedef struct
@@ -3280,6 +3281,43 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_FinishPack(OnlnPack *pack, u32 stage
     return 0;
 }
 
+PLUGIN_CODE(onln) static bool PLUGIN_onln_PackOutputComplete(
+    const MENUOnlineApi *api, const OnlnPack *pack)
+{
+    char path[ONLN_UPDATE_PATH_CAP];
+    bool found[ONLN_PACK_MAX_COMPONENTS];
+    u32 size = 0;
+    u32 offset = 0;
+
+    if (!api || !pack || !PLUGIN_onln_MakePluginPath(path, sizeof(path), pack->output) ||
+        R_FAILED(api->getFileSize(path, &size)) || !size)
+        return false;
+
+    for (u32 i = 0; i < ONLN_PACK_MAX_COMPONENTS; i++)
+        ((volatile bool *)found)[i] = false;
+
+    while (offset < size)
+    {
+        Onln3nxHeader header;
+        u32 metadataOffset;
+        u32 nextOffset;
+        if (!PLUGIN_onln_Read3nxHeader(api, path, size, offset, &header, &metadataOffset, &nextOffset) ||
+            nextOffset <= offset || nextOffset > size ||
+            (header.magic != ONLN_ROSALINA_MAGIC && header.magic != ONLN_LOADER_MAGIC))
+            return false;
+        for (u32 i = 0; i < pack->componentCount; i++)
+            if (pack->components[i].magic == header.magic &&
+                pack->components[i].plgid == header.plgid)
+                found[i] = true;
+        offset = nextOffset;
+    }
+
+    for (u32 i = 0; i < pack->componentCount; i++)
+        if (!found[i])
+            return false;
+    return true;
+}
+
 PLUGIN_CODE(onln) static Result PLUGIN_onln_ParsePackManifest(const MENUOnlineApi *api)
 {
     u32 size = 0;
@@ -3394,7 +3432,11 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_ParsePackManifest(const MENUOnlineAp
         if (R_FAILED(result))
             return result;
     }
-    return g_packCount ? 0 : ONLN_PACK_BAD_FORMAT;
+    if (!g_packCount)
+        return ONLN_PACK_BAD_FORMAT;
+    for (u32 i = 0; i < g_packCount; i++)
+        g_packs[i].outputComplete = PLUGIN_onln_PackOutputComplete(api, &g_packs[i]);
+    return 0;
 }
 
 PLUGIN_CODE(onln) static u32 PLUGIN_onln_PackState(const OnlnPack *pack)
@@ -3403,6 +3445,8 @@ PLUGIN_CODE(onln) static u32 PLUGIN_onln_PackState(const OnlnPack *pack)
     bool hasOlder = false;
     if (!pack)
         return ONLN_PACK_STATE_WHITE;
+    if (!pack->outputComplete)
+        return ONLN_PACK_STATE_BLUE;
     for (u32 i = 0; i < pack->componentCount; i++)
     {
         const OnlnStackId *id = &pack->components[i];
@@ -4133,13 +4177,17 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_ActOnPack(
             return 0;
         }
     }
-    result = PLUGIN_onln_UpdatePackComponents(api, pack, false);
-    if (R_FAILED(result))
-        return result;
+    if (pack->outputComplete)
+    {
+        result = PLUGIN_onln_UpdatePackComponents(api, pack, false);
+        if (R_FAILED(result))
+            return result;
+    }
     PLUGIN_onln_DrawPackMessage(api, pack, g_packBuilding, 0);
     result = PLUGIN_onln_BuildPack(api, pack);
     if (R_FAILED(result))
         return result;
+    pack->outputComplete = true;
     result = PLUGIN_onln_ScanSelected(api);
     if (R_FAILED(result))
         return result;
