@@ -3281,16 +3281,20 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_FinishPack(OnlnPack *pack, u32 stage
     return 0;
 }
 
-PLUGIN_CODE(onln) static bool PLUGIN_onln_PackOutputComplete(
-    const MENUOnlineApi *api, const OnlnPack *pack)
+PLUGIN_CODE(onln) static bool PLUGIN_onln_PackPathStatus(
+    const MENUOnlineApi *api,
+    const OnlnPack *pack,
+    const char *path,
+    u32 *matchedOut,
+    bool *subsetOnlyOut)
 {
-    char path[ONLN_UPDATE_PATH_CAP];
     bool found[ONLN_PACK_MAX_COMPONENTS];
     u32 size = 0;
     u32 offset = 0;
+    u32 matched = 0;
+    bool subsetOnly = true;
 
-    if (!api || !pack || !PLUGIN_onln_MakePluginPath(path, sizeof(path), pack->output) ||
-        R_FAILED(api->getFileSize(path, &size)) || !size)
+    if (!api || !pack || !path || R_FAILED(api->getFileSize(path, &size)) || !size)
         return false;
 
     for (u32 i = 0; i < ONLN_PACK_MAX_COMPONENTS; i++)
@@ -3301,21 +3305,115 @@ PLUGIN_CODE(onln) static bool PLUGIN_onln_PackOutputComplete(
         Onln3nxHeader header;
         u32 metadataOffset;
         u32 nextOffset;
+        bool belongs = false;
+
         if (!PLUGIN_onln_Read3nxHeader(api, path, size, offset, &header, &metadataOffset, &nextOffset) ||
             nextOffset <= offset || nextOffset > size ||
             (header.magic != ONLN_ROSALINA_MAGIC && header.magic != ONLN_LOADER_MAGIC))
             return false;
+
         for (u32 i = 0; i < pack->componentCount; i++)
-            if (pack->components[i].magic == header.magic &&
-                pack->components[i].plgid == header.plgid)
+        {
+            if (pack->components[i].magic != header.magic ||
+                pack->components[i].plgid != header.plgid)
+                continue;
+            belongs = true;
+            if (!found[i])
+            {
                 found[i] = true;
+                matched++;
+            }
+            break;
+        }
+
+        if (!belongs)
+            subsetOnly = false;
         offset = nextOffset;
     }
 
-    for (u32 i = 0; i < pack->componentCount; i++)
-        if (!found[i])
-            return false;
+    if (matchedOut)
+        *matchedOut = matched;
+    if (subsetOnlyOut)
+        *subsetOnlyOut = subsetOnly;
     return true;
+}
+
+PLUGIN_CODE(onln) static bool PLUGIN_onln_PackOutputComplete(
+    const MENUOnlineApi *api, const OnlnPack *pack)
+{
+    char path[ONLN_UPDATE_PATH_CAP];
+    u32 matched = 0;
+    bool subsetOnly = false;
+
+    if (!api || !pack)
+        return false;
+
+    if (PLUGIN_onln_MakePluginPath(path, sizeof(path), pack->output) &&
+        PLUGIN_onln_PackPathStatus(api, pack, path, &matched, &subsetOnly) &&
+        matched == pack->componentCount)
+        return true;
+
+    for (u32 i = 0; i < pack->componentCount; i++)
+    {
+        OnlnSelectedPlugin *local = PLUGIN_onln_FindSelected(
+            pack->components[i].magic, pack->components[i].plgid);
+        if (!local)
+            continue;
+        if (PLUGIN_onln_PackPathStatus(api, pack, local->path, &matched, &subsetOnly) &&
+            matched == pack->componentCount)
+            return true;
+    }
+    return false;
+}
+
+PLUGIN_CODE(onln) static bool PLUGIN_onln_FindPackRebuildTarget(
+    const MENUOnlineApi *api,
+    const OnlnPack *pack,
+    char *target,
+    u32 targetSize)
+{
+    char outputPath[ONLN_UPDATE_PATH_CAP];
+    u32 matched = 0;
+    u32 bestMatched = 0;
+    bool subsetOnly = false;
+    bool found = false;
+
+    if (!api || !pack || !target || !targetSize)
+        return false;
+
+    if (PLUGIN_onln_MakePluginPath(outputPath, sizeof(outputPath), pack->output) &&
+        PLUGIN_onln_PackPathStatus(api, pack, outputPath, &matched, &subsetOnly) &&
+        subsetOnly && matched && matched < pack->componentCount)
+        return PLUGIN_onln_CopyString(target, targetSize, outputPath);
+
+    for (u32 pass = 0; pass < 2u; pass++)
+    {
+        for (u32 i = 0; i < pack->componentCount; i++)
+        {
+            const OnlnStackId *id = &pack->components[i];
+            OnlnSelectedPlugin *local = PLUGIN_onln_FindSelected(id->magic, id->plgid);
+            OnlnRemotePlugin *remote = PLUGIN_onln_FindRemote(id->magic, id->plgid);
+            bool needsUpdate = local && remote &&
+                (!local->hasLocalVersion || remote->version > local->localVersion);
+
+            if (!local || (!pass && !needsUpdate))
+                continue;
+            if (!PLUGIN_onln_PackPathStatus(api, pack, local->path, &matched, &subsetOnly) ||
+                !subsetOnly || !matched || matched >= pack->componentCount)
+                continue;
+            if (!found || matched > bestMatched)
+            {
+                if (!PLUGIN_onln_CopyString(target, targetSize, local->path))
+                    return false;
+                bestMatched = matched;
+                found = true;
+            }
+        }
+        if (found)
+            return true;
+    }
+
+    return PLUGIN_onln_MakePluginPath(target, targetSize, pack->output);
 }
 
 PLUGIN_CODE(onln) static Result PLUGIN_onln_ParsePackManifest(const MENUOnlineApi *api)
@@ -3445,8 +3543,6 @@ PLUGIN_CODE(onln) static u32 PLUGIN_onln_PackState(const OnlnPack *pack)
     bool hasOlder = false;
     if (!pack)
         return ONLN_PACK_STATE_WHITE;
-    if (!pack->outputComplete)
-        return ONLN_PACK_STATE_BLUE;
     for (u32 i = 0; i < pack->componentCount; i++)
     {
         const OnlnStackId *id = &pack->components[i];
@@ -3461,7 +3557,7 @@ PLUGIN_CODE(onln) static u32 PLUGIN_onln_PackState(const OnlnPack *pack)
         else if (remote->version < local->localVersion)
             hasOlder = true;
     }
-    if (hasUpdate)
+    if (!pack->outputComplete || hasUpdate)
         return ONLN_PACK_STATE_GREEN;
     if (hasOlder)
         return ONLN_PACK_STATE_RED;
@@ -4062,13 +4158,18 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_UpdatePackComponents(
 }
 
 PLUGIN_CODE(onln) static Result PLUGIN_onln_BuildPack(
-    const MENUOnlineApi *api, const OnlnPack *pack)
+    const MENUOnlineApi *api,
+    const OnlnPack *pack,
+    const char *targetOverride)
 {
     char target[ONLN_UPDATE_PATH_CAP];
     u32 outputOffset = 0;
     Result result;
 
-    if (!pack || !PLUGIN_onln_MakePluginPath(target, sizeof(target), pack->output))
+    if (!pack ||
+        (targetOverride ?
+            !PLUGIN_onln_CopyString(target, sizeof(target), targetOverride) :
+            !PLUGIN_onln_MakePluginPath(target, sizeof(target), pack->output)))
         return ONLN_PACK_BAD_FORMAT;
     PLUGIN_onln_DeleteIfExists(api, g_updateRebuildPath);
     result = api->setFileSize(g_updateRebuildPath, 0);
@@ -4135,6 +4236,23 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_ActOnPack(
     Result result;
     if (state == ONLN_PACK_STATE_GREEN)
     {
+        if (!pack->outputComplete)
+        {
+            char target[ONLN_UPDATE_PATH_CAP];
+            if (!PLUGIN_onln_FindPackRebuildTarget(api, pack, target, sizeof(target)))
+                return ONLN_PACK_BAD_FORMAT;
+            PLUGIN_onln_DrawPackMessage(api, pack, g_packBuilding, 0);
+            result = PLUGIN_onln_BuildPack(api, pack, target);
+            if (R_FAILED(result))
+                return result;
+            pack->outputComplete = true;
+            result = PLUGIN_onln_ScanSelected(api);
+            if (R_FAILED(result))
+                return result;
+            PLUGIN_onln_LinkRemoteToSelected();
+            PLUGIN_onln_DrawPackMessage(api, pack, g_packUpdated, 0);
+            return 0;
+        }
         result = PLUGIN_onln_UpdatePackComponents(api, pack, false);
         if (R_SUCCEEDED(result))
             PLUGIN_onln_DrawPackMessage(api, pack, g_packUpdated, 0);
@@ -4184,7 +4302,7 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_ActOnPack(
             return result;
     }
     PLUGIN_onln_DrawPackMessage(api, pack, g_packBuilding, 0);
-    result = PLUGIN_onln_BuildPack(api, pack);
+    result = PLUGIN_onln_BuildPack(api, pack, NULL);
     if (R_FAILED(result))
         return result;
     pack->outputComplete = true;
