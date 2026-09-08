@@ -2,10 +2,10 @@
 
 The core menu and shared API for [Nexus3DS](https://github.com/2b-zipper/Nexus3DS/tree/dev) Sysplugins!
 
-This adds the **Sysplugin Menu** to Rosalina, letting other `.3nx` plugins register their own pages, save persistent data and integrate with the Online Menu without having to build everything directly into `boot.firm`.
+This adds the **Sysplugin Menu** to Rosalina, letting other `.3nx` plugins register their own pages, save persistent data and register their own Online Menu without having to build everything directly into `boot.firm`.
 
 For example plugins using it, see [my Sysplugins](https://github.com/Blurro/Blurros-Sysplugins).
-<br>The simplest plugin to check out is PowerPrevent!
+<br>For developers, the simplest plugin to check out is 'Hello World', and 'PowerPrevent'!
 
 ## Building
 
