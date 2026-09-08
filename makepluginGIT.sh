@@ -67,7 +67,7 @@ LOADER_PLUGIN_CONFIG=(
 # Files are concatenated in listed order with no gaps, then the combined metadata is padded to 16 bytes.
 # Re-running replaces that plugin's previous metadata. Already-stacked .3nx targets are warned and dropped.
 METADATA_CONFIG=(
-    "menu_r|version102.bin|httpslib.3on.lz"
+    "menu_r|version103.bin|httpslib.3on.lz"
 )
 
 # GitHub update payloads must be standalone single-entry files.

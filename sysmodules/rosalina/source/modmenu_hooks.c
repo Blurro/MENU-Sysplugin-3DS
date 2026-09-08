@@ -27,43 +27,96 @@ extern bool g_MENUInsideMenu;
     ((void(*)(void))pluginTable_MENU[25])
 #define MENU_HOST__svcInvalidateEntireInstructionCache \
     ((void(*)(void))pluginTable_MENU[26])
+#define MENU_HOST__svcControlMemoryUnsafe \
+    ((Result(*)(u32*,u32,u32,MemOp,MemPerm))pluginTable_MENU[29])
 
 PLUGIN_BSS(MENU) static u32 g_MENUDrawStringContinue;
 
 extern bool PLUGIN_MENU_FindFreeRange(u32 size, u32 *outBase);
 
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_MapPage(
+PLUGIN_CODE(MENU) static bool PLUGIN_MENU_AllocAliasGuard(u32 address)
+{
+    u32 allocated = 0;
+    Result result = MENU_HOST__svcControlMemoryUnsafe(
+        &allocated,
+        address,
+        0x1000u,
+        MEMOP_ALLOC | MEMOP_REGION_SYSTEM,
+        MEMPERM_READWRITE
+    );
+    return R_SUCCEEDED(result) && allocated == address;
+}
+
+PLUGIN_CODE(MENU) static void PLUGIN_MENU_FreeAliasGuard(u32 address)
+{
+    u32 out;
+    (void)MENU_HOST__svcControlMemoryUnsafe(
+        &out,
+        address,
+        0x1000u,
+        MEMOP_FREE | MEMOP_REGION_SYSTEM,
+        MEMPERM_DONTCARE
+    );
+}
+
+PLUGIN_CODE(MENU) bool PLUGIN_MENU_MapPage(
+    Handle sourceProcess,
     u32 sourceAddress,
     u32 *mappedBase,
     u32 *mappedAddress
 )
 {
-    u32 base;
+    u32 guardBase;
+    u32 aliasBase;
     u32 page = sourceAddress & ~0xFFFu;
 
-    if (!mappedBase || !mappedAddress || !PLUGIN_MENU_FindFreeRange(0x1000, &base))
-        return false;
-
-    if (R_FAILED(MENU_HOST__svcMapProcessMemoryEx(
-            CUR_PROCESS_HANDLE,
-            base,
-            CUR_PROCESS_HANDLE,
-            page,
-            0x1000,
-            (MapExFlags)0)))
+    if (!mappedBase || !mappedAddress || !
+        PLUGIN_MENU_FindFreeRange(0x3000u, &guardBase))
     {
         return false;
     }
 
-    *mappedBase = base;
-    *mappedAddress = base + (sourceAddress & 0xFFFu);
+    aliasBase = guardBase + 0x1000u;
+    if (!PLUGIN_MENU_AllocAliasGuard(guardBase))
+        return false;
+
+    if (!PLUGIN_MENU_AllocAliasGuard(aliasBase + 0x1000u))
+    {
+        PLUGIN_MENU_FreeAliasGuard(guardBase);
+        return false;
+    }
+
+    if (R_FAILED(MENU_HOST__svcMapProcessMemoryEx(
+            CUR_PROCESS_HANDLE,
+            aliasBase,
+            sourceProcess,
+            page,
+            0x1000u,
+            (MapExFlags)0)))
+    {
+        PLUGIN_MENU_FreeAliasGuard(aliasBase + 0x1000u);
+        PLUGIN_MENU_FreeAliasGuard(guardBase);
+        return false;
+    }
+
+    *mappedBase = aliasBase;
+    *mappedAddress = aliasBase + (sourceAddress & 0xFFFu);
     return true;
 }
 
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_UnmapPage(u32 mappedBase)
+PLUGIN_CODE(MENU) void PLUGIN_MENU_UnmapPage(u32 mappedBase)
 {
-    if (mappedBase)
-        MENU_HOST__svcUnmapProcessMemoryEx(CUR_PROCESS_HANDLE, mappedBase, 0x1000);
+    if (!mappedBase)
+        return;
+
+    if (R_SUCCEEDED(MENU_HOST__svcUnmapProcessMemoryEx(
+            CUR_PROCESS_HANDLE,
+            mappedBase,
+            0x1000u)))
+    {
+        PLUGIN_MENU_FreeAliasGuard(mappedBase - 0x1000u);
+        PLUGIN_MENU_FreeAliasGuard(mappedBase + 0x1000u);
+    }
 }
 
 PLUGIN_CODE(MENU) static u32 PLUGIN_MENU_StringLength(const char *text)
@@ -129,7 +182,7 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_InstallDrawStringHook(void)
     u32 mappedAddress = 0;
 
     if ((address & 0xFFFu) > 0xFF8u ||
-        !PLUGIN_MENU_MapPage(address, &mappedBase, &mappedAddress))
+        !PLUGIN_MENU_MapPage(CUR_PROCESS_HANDLE, address, &mappedBase, &mappedAddress))
     {
         return false;
     }

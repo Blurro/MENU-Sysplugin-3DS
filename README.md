@@ -90,9 +90,19 @@ Plugins can add their own Online Menu sources or open one directly.
 bool PLUGIN_MENU_FindFreeRange(u32 size, u32 *outBase);
 bool PLUGIN_MENU_TempAlloc(u32 size, u32 *outBase);
 void PLUGIN_MENU_TempFree(u32 base, u32 size);
+bool PLUGIN_MENU_MapPage(Handle sourceProcess, u32 sourceAddress, u32 *mappedBase, u32 *mappedAddress);
+void PLUGIN_MENU_UnmapPage(u32 mappedBase);
 ```
 
-Useful for temporary buffers without permanently inflating plugin BSS. `TempAlloc` allocates the range, while `FindFreeRange` only finds a suitable free location.
+`FindFreeRange` only searches Rosalina's virtual address space for a suitable free range.
+
+`TempAlloc` uses that free-range search to create ordinary temporary memory with `ControlMemoryUnsafe`, and `TempFree` releases that allocation. Use these for temporary buffers without permanently inflating plugin BSS.
+
+`MapPage` and `UnmapPage` are a separate guarded-alias API. `MapPage` handles the full mapping setup itself: it finds space for three pages, allocates a guard page before and after the alias, and maps the requested source page into the middle. Callers do not need to find the alias address or allocate guard pages themselves.
+
+`UnmapPage` removes the middle alias and then frees both guards.
+
+The guards are required because compatible adjacent `MapProcessMemoryEx` mappings can merge into one kernel region. Unmapping only one page from such a merged region, using UnmapProcessMemoryEx, has a bug where it will remove following pages too.
 
 </details>
 
