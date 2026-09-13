@@ -321,6 +321,7 @@ PLUGIN_BSS(onln) static u32 g_updateLoaderCount;
 PLUGIN_BSS(onln) static u32 g_updateRosalinaCount;
 PLUGIN_BSS(onln) static u8 g_updateIo[ONLN_UPDATE_IO_SIZE];
 PLUGIN_BSS(onln) static char g_updateUrl[ONLN_UPDATE_URL_CAP];
+PLUGIN_BSS(onln) static char g_updateResolvedUrl[ONLN_UPDATE_URL_CAP];
 PLUGIN_BSS(onln) static char g_updateNumber[4];
 PLUGIN_BSS(onln) static char g_updateId[5];
 PLUGIN_BSS(onln) static char g_updateJournalRead[ONLN_UPDATE_PATH_CAP];
@@ -1138,6 +1139,7 @@ PLUGIN_CODE(onln) static void PLUGIN_onln_LinkRemoteToSelected(void)
 }
 
 static bool PLUGIN_onln_IsPackSeparator(const char *line, u32 length);
+static bool PLUGIN_onln_ResolveSourceAssetUrl(const MENUOnlineApi *api, char *url, u32 urlSize);
 
 PLUGIN_CODE(onln) static s32 PLUGIN_onln_HexDigit(char value)
 {
@@ -1671,9 +1673,7 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_ReadManifestUrl(
         !PLUGIN_onln_ReadExact(api, g_updateManifestPath, selected->urlOffset, g_updateUrl, selected->urlLength))
         return ONLN_UPDATE_BAD_FORMAT;
     g_updateUrl[selected->urlLength] = 0;
-    if (selected->urlLength < 8u || g_updateUrl[0] != 'h' || g_updateUrl[1] != 't' ||
-        g_updateUrl[2] != 't' || g_updateUrl[3] != 'p' || g_updateUrl[4] != 's' ||
-        g_updateUrl[5] != ':' || g_updateUrl[6] != '/' || g_updateUrl[7] != '/')
+    if (!PLUGIN_onln_ResolveSourceAssetUrl(api, g_updateUrl, sizeof(g_updateUrl)))
         return ONLN_UPDATE_BAD_FORMAT;
     return 0;
 }
@@ -1819,6 +1819,41 @@ PLUGIN_CODE(onln) static bool PLUGIN_onln_BuildSourceUrl(
 
     out[position] = 0;
     return true;
+}
+
+PLUGIN_CODE(onln) static bool PLUGIN_onln_IsHttpsUrl(const char *url, u32 length)
+{
+    return url && length >= 8u &&
+           url[0] == 'h' && url[1] == 't' && url[2] == 't' && url[3] == 'p' &&
+           url[4] == 's' && url[5] == ':' && url[6] == '/' && url[7] == '/';
+}
+
+PLUGIN_CODE(onln) static bool PLUGIN_onln_ResolveSourceAssetUrl(
+    const MENUOnlineApi *api,
+    char *url,
+    u32 urlSize
+)
+{
+    u32 length = 0;
+
+    if (!api || !url || !urlSize)
+        return false;
+    while (length < urlSize && url[length])
+        length++;
+    if (!length || length >= urlSize)
+        return false;
+    if (PLUGIN_onln_IsHttpsUrl(url, length))
+        return true;
+
+    for (u32 i = 0; i + 2u < length; i++)
+    {
+        if (url[i] == ':' && url[i + 1u] == '/' && url[i + 2u] == '/')
+            return false;
+    }
+
+    if (!PLUGIN_onln_BuildSourceUrl(api, url, g_updateResolvedUrl, sizeof(g_updateResolvedUrl)))
+        return false;
+    return PLUGIN_onln_CopyString(url, urlSize, g_updateResolvedUrl);
 }
 
 PLUGIN_CODE(onln) static bool PLUGIN_onln_AppendText(char *out, u32 outSize, u32 *position, const char *text)
@@ -2504,7 +2539,6 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_ApplyStackManifestLine(
 {
     char countBytes[2];
     char descriptor[5];
-    char urlPrefix[8];
     s32 high;
     s32 low;
     u32 pluginCount;
@@ -2520,7 +2554,7 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_ApplyStackManifestLine(
         lineLength--;
     if (!lineLength)
         return 0;
-    if (lineLength < 2u + 5u + 8u ||
+    if (lineLength < 2u + 5u + 1u ||
         !PLUGIN_onln_ReadExact(api, g_stackManifestPath, lineStart, countBytes, sizeof(countBytes)))
         return ONLN_STACK_BAD_FORMAT;
 
@@ -2559,10 +2593,7 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_ApplyStackManifestLine(
 
     urlOffset = lineStart + 2u + descriptorBytes;
     urlLength = lineLength - 2u - descriptorBytes;
-    if (urlLength < 8u || urlLength >= ONLN_UPDATE_URL_CAP ||
-        !PLUGIN_onln_ReadExact(api, g_stackManifestPath, urlOffset, urlPrefix, sizeof(urlPrefix)) ||
-        urlPrefix[0] != 'h' || urlPrefix[1] != 't' || urlPrefix[2] != 't' || urlPrefix[3] != 'p' ||
-        urlPrefix[4] != 's' || urlPrefix[5] != ':' || urlPrefix[6] != '/' || urlPrefix[7] != '/')
+    if (!urlLength || urlLength >= ONLN_UPDATE_URL_CAP)
         return ONLN_STACK_BAD_FORMAT;
 
     for (u32 i = 0; i < urlLength; i++)
@@ -2867,6 +2898,8 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_ReadStackUrl(
         !PLUGIN_onln_ReadExact(api, g_stackManifestPath, stack->urlOffset, g_updateUrl, stack->urlLength))
         return ONLN_STACK_BAD_FORMAT;
     g_updateUrl[stack->urlLength] = 0;
+    if (!PLUGIN_onln_ResolveSourceAssetUrl(api, g_updateUrl, sizeof(g_updateUrl)))
+        return ONLN_STACK_BAD_FORMAT;
     return 0;
 }
 
@@ -4020,9 +4053,7 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_ReadRemoteUrl(
         !PLUGIN_onln_ReadExact(api, g_updateManifestPath, remote->urlOffset, g_updateUrl, remote->urlLength))
         return ONLN_PACK_BAD_FORMAT;
     g_updateUrl[remote->urlLength] = 0;
-    if (remote->urlLength < 8u || g_updateUrl[0] != 'h' || g_updateUrl[1] != 't' ||
-        g_updateUrl[2] != 't' || g_updateUrl[3] != 'p' || g_updateUrl[4] != 's' ||
-        g_updateUrl[5] != ':' || g_updateUrl[6] != '/' || g_updateUrl[7] != '/')
+    if (!PLUGIN_onln_ResolveSourceAssetUrl(api, g_updateUrl, sizeof(g_updateUrl)))
         return ONLN_PACK_BAD_FORMAT;
     return 0;
 }
