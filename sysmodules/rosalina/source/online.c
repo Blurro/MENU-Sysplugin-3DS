@@ -56,25 +56,11 @@ typedef struct
     const char *sourceUrlPrefix;
 } MENUOnlineApi;
 
-PLUGIN_RODATA(onln) static const char g_onlineTitle[] = "Online Menu";
-PLUGIN_RODATA(onln) static const char g_onlineUtcItem[] = "UTC Fetch Menu";
-PLUGIN_RODATA(onln) static const char g_onlineSyspluginsItem[] = "Check Sysplugins...";
 PLUGIN_RODATA(onln) static const char g_onlineCursor[] = ">";
-PLUGIN_RODATA(onln) static const char g_onlineUtcTitle[] = "UTC Fetch Menu";
-PLUGIN_RODATA(onln) static const char g_onlinePrompt[] = "A: refresh live UTC";
-PLUGIN_RODATA(onln) static const char g_onlineReady[] = "Press A to fetch current UTC";
-PLUGIN_RODATA(onln) static const char g_onlineFetching[] = "Fetching live HTTPS time...";
-PLUGIN_RODATA(onln) static const char g_onlineSuccess[] = "Live HTTPS response:";
-PLUGIN_RODATA(onln) static const char g_onlineFailure[] = "HTTPS fetch failed";
-PLUGIN_RODATA(onln) static const char g_onlineParseFailure[] = "Could not parse utc_iso";
 PLUGIN_RODATA(onln) static const char g_onlineResultPrefix[] = "result: 0x";
 PLUGIN_RODATA(onln) static const char g_onlineHexDigits[] = "0123456789ABCDEF";
-PLUGIN_RODATA(onln) static const char g_onlineBack[] = "B: go back";
-PLUGIN_RODATA(onln) static const char g_onlineTimeUrl[] = "https://utctime.app/api/now";
-PLUGIN_RODATA(onln) static const char g_onlineUtcKey[] = "\"utc_iso\"";
 PLUGIN_RODATA(onln) static const char g_onlinePlus[] = "+";
 PLUGIN_RODATA(onln) static const char g_onlinePipe[] = "|";
-PLUGIN_RODATA(onln) static const char g_onlineRail[] = "----------------------";
 
 PLUGIN_RODATA(onln) static const char g_updateTitle[] = "Available Sysplugin Updates";
 PLUGIN_RODATA(onln) static const char g_updateManifestName[] = "plgpacks.txt";
@@ -162,6 +148,14 @@ PLUGIN_RODATA(onln) static const char g_packContinue[] = "A: Continue";
 PLUGIN_RODATA(onln) static const char g_packOutput[] = "Output: ";
 PLUGIN_RODATA(onln) static const char g_packDescription[] = "Description:";
 PLUGIN_RODATA(onln) static const char g_packComponents[] = "Components:";
+PLUGIN_RODATA(onln) static const char g_packChangelog[] = "X: Changelog";
+PLUGIN_RODATA(onln) static const char g_changeFetchPrefix[] = "Fetching ";
+PLUGIN_RODATA(onln) static const char g_changeFetchSuffix[] = "...";
+PLUGIN_RODATA(onln) static const char g_changeTitle[] = "Changelog: ";
+PLUGIN_RODATA(onln) static const char g_changeNone[] = "No changelog found";
+PLUGIN_RODATA(onln) static const char g_changeNav[] = "Up/Down: versions";
+PLUGIN_RODATA(onln) static const char g_changeBack[] = "B: back";
+PLUGIN_RODATA(onln) static const char g_changeSuffix[] = "_change.txt";
 PLUGIN_RODATA(onln) static const u32 g_updateDecimalPowers[] = {
     1000000000u, 100000000u, 10000000u, 1000000u, 100000u,
     10000u, 1000u, 100u, 10u, 1u
@@ -213,6 +207,10 @@ PLUGIN_RODATA(onln) static const u32 g_updateDecimalPowers[] = {
 #define ONLN_PACK_STATE_BLUE 3u
 #define ONLN_PACK_MISSING_COLOR RGB8_to_565(120, 175, 255)
 #define ONLN_PACK_BAD_FORMAT ((Result)0xD8A0A092u)
+#define ONLN_CHANGE_MAX_ENTRIES 32u
+#define ONLN_CHANGE_LINE_MAX 46u
+#define ONLN_CHANGE_VISIBLE_LINES 12u
+#define ONLN_CHANGE_TEXT_TOP_Y 78u
 
 #pragma pack(push, 1)
 typedef struct
@@ -299,7 +297,15 @@ typedef struct
     u8 descriptionLines;
     u8 componentCount;
     bool outputComplete;
+    bool outputExists;
 } OnlnPack;
+
+typedef struct
+{
+    u32 version;
+    u32 textOffset;
+    u32 textLength;
+} OnlnChangeEntry;
 
 typedef struct
 {
@@ -313,8 +319,6 @@ typedef struct
 } OnlnPackPresenceContext;
 
 PLUGIN_BSS(onln) static char g_onlineResultHex[9];
-PLUGIN_BSS(onln) static char g_onlineTimeJson[512];
-PLUGIN_BSS(onln) static char g_onlineUtc[25];
 PLUGIN_BSS(onln) static OnlnSelectedPlugin g_updateLoader[ONLN_MAX_SELECTED];
 PLUGIN_BSS(onln) static OnlnSelectedPlugin g_updateRosalina[ONLN_MAX_SELECTED];
 PLUGIN_BSS(onln) static u32 g_updateLoaderCount;
@@ -339,6 +343,11 @@ PLUGIN_BSS(onln) static OnlnPack g_packs[ONLN_PACK_MAX];
 PLUGIN_BSS(onln) static u32 g_packCount;
 PLUGIN_BSS(onln) static char g_packManifest[ONLN_PACK_MANIFEST_MAX + 1u];
 PLUGIN_BSS(onln) static char g_packLine[96];
+PLUGIN_BSS(onln) static OnlnChangeEntry g_changeEntries[ONLN_CHANGE_MAX_ENTRIES];
+PLUGIN_BSS(onln) static u32 g_changeCount;
+PLUGIN_BSS(onln) static char g_changeFilename[ONLN_PACK_OUTPUT_MAX + 16u];
+PLUGIN_BSS(onln) static char g_changeStatus[128];
+PLUGIN_BSS(onln) static char g_changeLine[ONLN_CHANGE_LINE_MAX + 1u];
 
 PLUGIN_CODE(onln) static void PLUGIN_onln_FormatResult(Result result)
 {
@@ -348,181 +357,9 @@ PLUGIN_CODE(onln) static void PLUGIN_onln_FormatResult(Result result)
     g_onlineResultHex[8] = 0;
 }
 
-PLUGIN_CODE(onln) static bool PLUGIN_onln_ParseUtc(const char *json, u32 size)
-{
-    u32 keySize = 9u;
-
-    for (u32 i = 0; i + keySize < size; i++)
-    {
-        bool match = true;
-        for (u32 j = 0; j < keySize; j++)
-        {
-            if (json[i + j] != g_onlineUtcKey[j])
-            {
-                match = false;
-                break;
-            }
-        }
-        if (!match)
-            continue;
-
-        u32 pos = i + keySize;
-        while (pos < size && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == ':'))
-            pos++;
-        if (pos >= size || json[pos] != '"')
-            return false;
-        pos++;
-
-        u32 out = 0;
-        while (pos < size && json[pos] != '"' && out + 1u < sizeof(g_onlineUtc))
-            g_onlineUtc[out++] = json[pos++];
-        if (pos >= size || json[pos] != '"' || !out)
-            return false;
-        g_onlineUtc[out] = 0;
-        return true;
-    }
-    return false;
-}
-
 PLUGIN_CODE(onln) static void PLUGIN_onln_DrawDevMarker(const MENUOnlineApi *api)
 {
     (void)api;
-}
-
-PLUGIN_CODE(onln) static void PLUGIN_onln_DrawFrame(const MENUOnlineApi *api, const char *title)
-{
-    api->drawString(10, 8, MENU_ONLINE_BORDER_COLOR, g_onlinePlus);
-    api->drawString(16, 8, MENU_ONLINE_BORDER_COLOR, g_onlineRail);
-    api->drawString(148, 8, MENU_ONLINE_BORDER_COLOR, g_onlinePlus);
-    api->drawString(10, 16, MENU_ONLINE_BORDER_COLOR, g_onlinePipe);
-    api->drawString(148, 16, MENU_ONLINE_BORDER_COLOR, g_onlinePipe);
-    api->drawString(10, 24, MENU_ONLINE_BORDER_COLOR, g_onlinePlus);
-    api->drawString(16, 24, MENU_ONLINE_BORDER_COLOR, g_onlineRail);
-    api->drawString(148, 24, MENU_ONLINE_BORDER_COLOR, g_onlinePlus);
-    api->drawString(20, 16, MENU_ONLINE_TITLE_COLOR, title);
-    PLUGIN_onln_DrawDevMarker(api);
-}
-
-PLUGIN_CODE(onln) static u32 PLUGIN_onln_RootItemY(u32 index)
-{
-    return index == 0u ? 48u : 68u;
-}
-
-PLUGIN_CODE(onln) static void PLUGIN_onln_DrawRootItem(
-    const MENUOnlineApi *api,
-    u32 index,
-    bool selected)
-{
-    u32 y = PLUGIN_onln_RootItemY(index);
-
-    if (index > 1u)
-        return;
-    if (selected)
-        api->drawString(12, y, COLOR_CYAN, g_onlineCursor);
-    api->drawString(24, y, selected ? COLOR_CYAN : COLOR_WHITE,
-                    index == 0u ? g_onlineUtcItem : g_onlineSyspluginsItem);
-}
-
-PLUGIN_CODE(onln) static void PLUGIN_onln_DrawRoot(const MENUOnlineApi *api, u32 selected)
-{
-    api->drawLock();
-    api->drawClear();
-    PLUGIN_onln_DrawFrame(api, g_onlineTitle);
-    PLUGIN_onln_DrawRootItem(api, 0u, selected == 0u);
-    PLUGIN_onln_DrawRootItem(api, 1u, selected == 1u);
-    api->drawString(20, 120, COLOR_GRAY, g_onlineBack);
-    api->drawFlush();
-    api->drawUnlock();
-}
-
-PLUGIN_CODE(onln) static void PLUGIN_onln_RedrawRootSelection(
-    const MENUOnlineApi *api,
-    u32 oldSelected,
-    u32 selected)
-{
-    u32 oldY = PLUGIN_onln_RootItemY(oldSelected);
-    u32 newY = PLUGIN_onln_RootItemY(selected);
-
-    api->drawLock();
-    api->drawString(10, oldY, COLOR_BLACK, g_updateClearRow);
-    api->drawString(10, newY, COLOR_BLACK, g_updateClearRow);
-    PLUGIN_onln_DrawRootItem(api, oldSelected, false);
-    PLUGIN_onln_DrawRootItem(api, selected, true);
-    api->drawFlush();
-    api->drawUnlock();
-}
-
-PLUGIN_CODE(onln) static void PLUGIN_onln_DrawUtc(const MENUOnlineApi *api, s32 state, Result result)
-{
-    api->drawLock();
-    api->drawClear();
-    PLUGIN_onln_DrawFrame(api, g_onlineUtcTitle);
-    api->drawString(20, 45, COLOR_WHITE, g_onlinePrompt);
-
-    if (state == 0)
-        api->drawString(20, 70, COLOR_GRAY, g_onlineReady);
-    else if (state == 1)
-        api->drawString(20, 70, COLOR_GRAY, g_onlineFetching);
-    else if (state == 2)
-    {
-        api->drawString(20, 70, COLOR_GREEN, g_onlineSuccess);
-        api->drawString(20, 90, COLOR_WHITE, g_onlineUtc);
-    }
-    else if (state == -2)
-        api->drawString(20, 70, COLOR_RED, g_onlineParseFailure);
-    else
-    {
-        PLUGIN_onln_FormatResult(result);
-        api->drawString(20, 70, COLOR_RED, g_onlineFailure);
-        api->drawString(20, 90, COLOR_WHITE, g_onlineResultPrefix);
-        api->drawString(80, 90, COLOR_WHITE, g_onlineResultHex);
-    }
-
-    api->drawString(20, 120, COLOR_GRAY, g_onlineBack);
-    api->drawFlush();
-    api->drawUnlock();
-}
-
-PLUGIN_CODE(onln) static void PLUGIN_onln_RunUtc(const MENUOnlineApi *api)
-{
-    PLUGIN_onln_DrawUtc(api, 0, 0);
-    do
-    {
-        u32 pressed = api->waitInputWithTimeout(50);
-        if (pressed & KEY_B)
-            return;
-        if (pressed & KEY_A)
-        {
-            u32 actualSize = 0;
-            Result result;
-
-            PLUGIN_onln_DrawUtc(api, 1, 0);
-            result = api->downloadToMemory(
-                g_onlineTimeUrl,
-                g_onlineTimeJson,
-                sizeof(g_onlineTimeJson) - 1u,
-                &actualSize);
-
-            if (R_FAILED(result))
-            {
-                PLUGIN_onln_DrawUtc(api, -1, result);
-                continue;
-            }
-
-            if (actualSize >= sizeof(g_onlineTimeJson))
-            {
-                PLUGIN_onln_DrawUtc(api, -2, 0);
-                continue;
-            }
-            g_onlineTimeJson[actualSize] = 0;
-            if (!PLUGIN_onln_ParseUtc(g_onlineTimeJson, actualSize))
-            {
-                PLUGIN_onln_DrawUtc(api, -2, 0);
-                continue;
-            }
-            PLUGIN_onln_DrawUtc(api, 2, 0);
-        }
-    } while (!*api->menuShouldExit);
 }
 
 PLUGIN_CODE(onln) static bool PLUGIN_onln_Add32(u32 a, u32 b, u32 *out)
@@ -3566,12 +3403,19 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_ParsePackManifest(const MENUOnlineAp
     if (!g_packCount)
         return ONLN_PACK_BAD_FORMAT;
     for (u32 i = 0; i < g_packCount; i++)
+    {
+        char outputPath[ONLN_UPDATE_PATH_CAP];
+        g_packs[i].outputExists =
+            PLUGIN_onln_MakePluginPath(outputPath, sizeof(outputPath), g_packs[i].output) &&
+            PLUGIN_onln_FileExists(api, outputPath);
         g_packs[i].outputComplete = PLUGIN_onln_PackOutputComplete(api, &g_packs[i]);
+    }
     return 0;
 }
 
 PLUGIN_CODE(onln) static u32 PLUGIN_onln_PackState(const OnlnPack *pack)
 {
+    bool hasMissing = false;
     bool hasUpdate = false;
     bool hasOlder = false;
     if (!pack)
@@ -3582,7 +3426,10 @@ PLUGIN_CODE(onln) static u32 PLUGIN_onln_PackState(const OnlnPack *pack)
         OnlnSelectedPlugin *local = PLUGIN_onln_FindSelected(id->magic, id->plgid);
         OnlnRemotePlugin *remote = PLUGIN_onln_FindRemote(id->magic, id->plgid);
         if (!local)
-            return ONLN_PACK_STATE_BLUE;
+        {
+            hasMissing = true;
+            continue;
+        }
         if (!remote)
             continue;
         if (!local->hasLocalVersion || remote->version > local->localVersion)
@@ -3590,6 +3437,8 @@ PLUGIN_CODE(onln) static u32 PLUGIN_onln_PackState(const OnlnPack *pack)
         else if (remote->version < local->localVersion)
             hasOlder = true;
     }
+    if (hasMissing)
+        return pack->outputExists ? ONLN_PACK_STATE_GREEN : ONLN_PACK_STATE_BLUE;
     if (!pack->outputComplete || hasUpdate)
         return ONLN_PACK_STATE_GREEN;
     if (hasOlder)
@@ -3754,6 +3603,406 @@ PLUGIN_CODE(onln) static u16 PLUGIN_onln_PackComponentColor(const OnlnStackId *i
     return COLOR_WHITE;
 }
 
+PLUGIN_CODE(onln) static u32 PLUGIN_onln_PackLatestVersion(const OnlnPack *pack)
+{
+    u32 latest = 0;
+    if (!pack)
+        return 0;
+    for (u32 i = 0; i < pack->componentCount; i++)
+    {
+        OnlnRemotePlugin *remote = PLUGIN_onln_FindRemote(
+            pack->components[i].magic, pack->components[i].plgid);
+        if (remote && remote->version > latest)
+            latest = remote->version;
+    }
+    return latest;
+}
+
+PLUGIN_CODE(onln) static bool PLUGIN_onln_BuildChangelogFilename(
+    const OnlnPack *pack, char *out, u32 outSize)
+{
+    u32 length = 0;
+    u32 extension;
+    u32 priorityDot;
+    u32 position = 0;
+
+    if (!pack || !out || !outSize)
+        return false;
+    while (pack->output[length])
+    {
+        if (length + 1u >= ONLN_PACK_OUTPUT_MAX + 1u)
+            return false;
+        length++;
+    }
+    if (length < 6u || pack->output[length - 4u] != '.' ||
+        pack->output[length - 3u] != '3' || pack->output[length - 2u] != 'n' ||
+        pack->output[length - 1u] != 'x')
+        return false;
+
+    extension = length - 4u;
+    priorityDot = extension;
+    while (priorityDot > 0u && pack->output[priorityDot - 1u] != '.')
+        priorityDot--;
+    if (!priorityDot)
+        return false;
+    priorityDot--;
+    if (!priorityDot)
+        return false;
+
+    for (u32 i = 0; i < priorityDot; i++)
+    {
+        if (position + 1u >= outSize)
+            return false;
+        out[position++] = pack->output[i];
+    }
+    out[position] = 0;
+    return PLUGIN_onln_AppendText(out, outSize, &position, g_changeSuffix);
+}
+
+PLUGIN_CODE(onln) static bool PLUGIN_onln_ParseChangelogVersion(
+    const char *line, u32 length, u32 *version)
+{
+    u32 dot = 0;
+    u32 major = 0;
+    u32 minor;
+
+    if (!line || !version || length < 7u || line[0] != '[' || line[1] != 'v' ||
+        line[length - 1u] != ']')
+        return false;
+
+    for (u32 i = 2u; i + 1u < length; i++)
+    {
+        if (line[i] == '.')
+        {
+            if (dot)
+                return false;
+            dot = i;
+            continue;
+        }
+        if (line[i] < '0' || line[i] > '9')
+            return false;
+    }
+    if (!dot || dot == 2u || dot + 3u != length - 1u)
+        return false;
+
+    for (u32 i = 2u; i < dot; i++)
+    {
+        u32 digit = (u32)(line[i] - '0');
+        if (major > (0xFFFFFFFFu - digit) / 10u)
+            return false;
+        major = major * 10u + digit;
+    }
+    if (major > (0xFFFFFFFFu - 99u) / 100u)
+        return false;
+    minor = (u32)(line[dot + 1u] - '0') * 10u + (u32)(line[dot + 2u] - '0');
+    *version = major * 100u + minor;
+    return true;
+}
+
+PLUGIN_CODE(onln) static void PLUGIN_onln_TrimChangelogEntry(
+    OnlnChangeEntry *entry, u32 end)
+{
+    if (!entry || end < entry->textOffset)
+        return;
+    while (end > entry->textOffset &&
+           (g_packManifest[end - 1u] == '\n' || g_packManifest[end - 1u] == '\r'))
+        end--;
+    entry->textLength = end - entry->textOffset;
+}
+
+PLUGIN_CODE(onln) static void PLUGIN_onln_ParseChangelog(u32 size, u32 latestVersion)
+{
+    s32 active = -1;
+    u32 position = 0;
+    g_changeCount = 0;
+
+    while (position < size)
+    {
+        u32 lineStart = position;
+        u32 lineEnd;
+        u32 next;
+        u32 length;
+        u32 version;
+
+        while (position < size && g_packManifest[position] != '\n')
+            position++;
+        lineEnd = position;
+        if (lineEnd > lineStart && g_packManifest[lineEnd - 1u] == '\r')
+            lineEnd--;
+        length = lineEnd - lineStart;
+        next = position < size ? position + 1u : position;
+
+        if (PLUGIN_onln_ParseChangelogVersion(g_packManifest + lineStart, length, &version))
+        {
+            bool duplicate = false;
+            if (active >= 0)
+                PLUGIN_onln_TrimChangelogEntry(&g_changeEntries[(u32)active], lineStart);
+            active = -1;
+            if (version <= latestVersion)
+            {
+                for (u32 i = 0; i < g_changeCount; i++)
+                    if (g_changeEntries[i].version == version)
+                        duplicate = true;
+                if (!duplicate && g_changeCount < ONLN_CHANGE_MAX_ENTRIES)
+                {
+                    OnlnChangeEntry *entry = &g_changeEntries[g_changeCount];
+                    entry->version = version;
+                    entry->textOffset = next;
+                    entry->textLength = 0;
+                    active = (s32)g_changeCount;
+                    g_changeCount++;
+                }
+            }
+        }
+        position = next;
+    }
+
+    if (active >= 0)
+        PLUGIN_onln_TrimChangelogEntry(&g_changeEntries[(u32)active], size);
+}
+
+PLUGIN_CODE(onln) static const OnlnChangeEntry *PLUGIN_onln_FindChangelogEntry(u32 version)
+{
+    for (u32 i = 0; i < g_changeCount; i++)
+        if (g_changeEntries[i].version == version)
+            return &g_changeEntries[i];
+    return NULL;
+}
+
+PLUGIN_CODE(onln) static bool PLUGIN_onln_FindOlderChangelogVersion(
+    u32 current, u32 *version)
+{
+    bool found = false;
+    u32 best = 0;
+    for (u32 i = 0; i < g_changeCount; i++)
+    {
+        u32 candidate = g_changeEntries[i].version;
+        if (candidate >= current || (found && candidate <= best))
+            continue;
+        best = candidate;
+        found = true;
+    }
+    if (found && version)
+        *version = best;
+    return found;
+}
+
+PLUGIN_CODE(onln) static bool PLUGIN_onln_FindNewerChangelogVersion(
+    u32 current, u32 latest, u32 *version)
+{
+    u32 best;
+    bool found;
+    if (current >= latest)
+        return false;
+    best = latest;
+    found = true;
+    for (u32 i = 0; i < g_changeCount; i++)
+    {
+        u32 candidate = g_changeEntries[i].version;
+        if (candidate <= current || candidate >= best)
+            continue;
+        best = candidate;
+    }
+    if (found && version)
+        *version = best;
+    return found;
+}
+
+PLUGIN_CODE(onln) static void PLUGIN_onln_DrawChangelogFetch(
+    const MENUOnlineApi *api, const OnlnPack *pack, const char *filename)
+{
+    u32 pos = 0;
+    g_changeStatus[0] = 0;
+    (void)PLUGIN_onln_AppendText(g_changeStatus, sizeof(g_changeStatus), &pos, g_changeFetchPrefix);
+    (void)PLUGIN_onln_AppendText(g_changeStatus, sizeof(g_changeStatus), &pos, filename);
+    (void)PLUGIN_onln_AppendText(g_changeStatus, sizeof(g_changeStatus), &pos, g_changeFetchSuffix);
+
+    api->drawLock();
+    api->drawClear();
+    PLUGIN_onln_DrawPackFrame(api);
+    api->drawString(20, 45, PLUGIN_onln_PackColor(PLUGIN_onln_PackState(pack)), pack->title);
+    api->drawString(20, 70, COLOR_GRAY, g_changeStatus);
+    api->drawFlush();
+    api->drawUnlock();
+}
+
+PLUGIN_CODE(onln) static void PLUGIN_onln_DrawChangelogText(
+    const MENUOnlineApi *api, const OnlnChangeEntry *entry)
+{
+    u32 row = 0;
+    u32 position = 0;
+
+    if (!entry || !entry->textLength)
+        return;
+
+    while (position < entry->textLength)
+    {
+        u32 lineStart = position;
+        u32 lineEnd;
+        u32 lineLength;
+        u32 linePosition = 0;
+
+        while (position < entry->textLength &&
+               g_packManifest[entry->textOffset + position] != '\n')
+            position++;
+        lineEnd = position;
+        if (lineEnd > lineStart && g_packManifest[entry->textOffset + lineEnd - 1u] == '\r')
+            lineEnd--;
+        lineLength = lineEnd - lineStart;
+
+        if (!lineLength)
+        {
+            row++;
+        }
+        else
+        {
+            while (linePosition < lineLength)
+            {
+                u32 remaining = lineLength - linePosition;
+                u32 available = remaining > ONLN_CHANGE_LINE_MAX ? ONLN_CHANGE_LINE_MAX : remaining;
+                u32 displayLength = available;
+                u32 consumed = available;
+
+                if (remaining > ONLN_CHANGE_LINE_MAX)
+                {
+                    u32 split = available;
+                    while (split > 0u &&
+                           g_packManifest[entry->textOffset + lineStart + linePosition + split - 1u] != ' ')
+                        split--;
+                    if (split > 1u)
+                    {
+                        displayLength = split - 1u;
+                        consumed = split;
+                    }
+                }
+                while (displayLength &&
+                       g_packManifest[entry->textOffset + lineStart + linePosition + displayLength - 1u] == ' ')
+                    displayLength--;
+
+                if (row < ONLN_CHANGE_VISIBLE_LINES && displayLength &&
+                    PLUGIN_onln_CopySpan(
+                        g_changeLine, sizeof(g_changeLine),
+                        g_packManifest + entry->textOffset + lineStart + linePosition,
+                        displayLength))
+                {
+                    api->drawString(
+                        24,
+                        ONLN_CHANGE_TEXT_TOP_Y + row * ONLN_UPDATE_ITEM_SPACING_Y,
+                        COLOR_WHITE,
+                        g_changeLine);
+                }
+                row++;
+                linePosition += consumed;
+                while (linePosition < lineLength &&
+                       g_packManifest[entry->textOffset + lineStart + linePosition] == ' ')
+                    linePosition++;
+            }
+        }
+
+        if (position < entry->textLength && g_packManifest[entry->textOffset + position] == '\n')
+            position++;
+    }
+}
+
+PLUGIN_CODE(onln) static void PLUGIN_onln_DrawChangelogBody(
+    const MENUOnlineApi *api, u32 version)
+{
+    const OnlnChangeEntry *entry = PLUGIN_onln_FindChangelogEntry(version);
+    if (!entry || !entry->textLength)
+    {
+        api->drawString(24, ONLN_CHANGE_TEXT_TOP_Y, COLOR_GRAY, g_changeNone);
+        return;
+    }
+    PLUGIN_onln_DrawChangelogText(api, entry);
+}
+
+PLUGIN_CODE(onln) static void PLUGIN_onln_DrawChangelogVersion(
+    const MENUOnlineApi *api, u32 version)
+{
+    char versionText[16];
+    u32 pos = 0;
+
+    g_packLine[0] = 0;
+    (void)PLUGIN_onln_AppendText(g_packLine, sizeof(g_packLine), &pos, g_changeTitle);
+    if (PLUGIN_onln_FormatVersionText(versionText, sizeof(versionText), version))
+        (void)PLUGIN_onln_AppendText(g_packLine, sizeof(g_packLine), &pos, versionText);
+    api->drawString(20, 59, COLOR_CYAN, g_packLine);
+}
+
+PLUGIN_CODE(onln) static void PLUGIN_onln_DrawChangelogPage(
+    const MENUOnlineApi *api, const OnlnPack *pack, u32 version)
+{
+    api->drawLock();
+    api->drawClear();
+    PLUGIN_onln_DrawPackFrame(api);
+    api->drawString(20, 42, PLUGIN_onln_PackColor(PLUGIN_onln_PackState(pack)), pack->title);
+    PLUGIN_onln_DrawChangelogVersion(api, version);
+    PLUGIN_onln_DrawChangelogBody(api, version);
+    api->drawString(24, ONLN_UPDATE_PROMPT_Y, COLOR_GRAY, g_changeNav);
+    api->drawString(190, ONLN_UPDATE_PROMPT_Y, COLOR_GRAY, g_changeBack);
+    api->drawFlush();
+    api->drawUnlock();
+}
+
+PLUGIN_CODE(onln) static void PLUGIN_onln_RedrawChangelog(
+    const MENUOnlineApi *api, u32 version)
+{
+    api->drawLock();
+    api->drawString(10, 59, COLOR_BLACK, g_updateClearRow);
+    PLUGIN_onln_DrawChangelogVersion(api, version);
+    for (u32 i = 0; i < ONLN_CHANGE_VISIBLE_LINES; i++)
+        api->drawString(10, ONLN_CHANGE_TEXT_TOP_Y + i * ONLN_UPDATE_ITEM_SPACING_Y,
+                        COLOR_BLACK, g_updateClearRow);
+    PLUGIN_onln_DrawChangelogBody(api, version);
+    api->drawFlush();
+    api->drawUnlock();
+}
+
+PLUGIN_CODE(onln) static void PLUGIN_onln_RunChangelog(
+    const MENUOnlineApi *api, const OnlnPack *pack)
+{
+    u32 latest = PLUGIN_onln_PackLatestVersion(pack);
+    u32 current = latest;
+    u32 actualSize = 0;
+    Result result = ONLN_PACK_BAD_FORMAT;
+
+    g_changeCount = 0;
+    if (!latest || !PLUGIN_onln_BuildChangelogFilename(pack, g_changeFilename, sizeof(g_changeFilename)))
+    {
+        PLUGIN_onln_DrawChangelogPage(api, pack, current);
+    }
+    else
+    {
+        PLUGIN_onln_DrawChangelogFetch(api, pack, g_changeFilename);
+        if (PLUGIN_onln_BuildSourceUrl(api, g_changeFilename, g_updateUrl, sizeof(g_updateUrl)))
+            result = api->downloadToMemory(
+                g_updateUrl, g_packManifest, ONLN_PACK_MANIFEST_MAX, &actualSize);
+        if (R_SUCCEEDED(result) && actualSize <= ONLN_PACK_MANIFEST_MAX)
+            PLUGIN_onln_ParseChangelog(actualSize, latest);
+        PLUGIN_onln_DrawChangelogPage(api, pack, current);
+    }
+
+    while (!*api->menuShouldExit)
+    {
+        u32 pressed = api->waitInputWithTimeout(50);
+        u32 next;
+        if (pressed & KEY_B)
+            return;
+        if ((pressed & KEY_DOWN) && PLUGIN_onln_FindOlderChangelogVersion(current, &next))
+        {
+            current = next;
+            PLUGIN_onln_RedrawChangelog(api, current);
+            continue;
+        }
+        if ((pressed & KEY_UP) && PLUGIN_onln_FindNewerChangelogVersion(current, latest, &next))
+        {
+            current = next;
+            PLUGIN_onln_RedrawChangelog(api, current);
+            continue;
+        }
+    }
+}
+
 PLUGIN_CODE(onln) static bool PLUGIN_onln_RunPackDetails(const MENUOnlineApi *api, const OnlnPack *pack)
 {
     u32 first = 0;
@@ -3811,6 +4060,7 @@ PLUGIN_CODE(onln) static bool PLUGIN_onln_RunPackDetails(const MENUOnlineApi *ap
                 api->drawString(24, 209, ONLN_PACK_MISSING_COLOR, g_packInstall);
             else
                 api->drawString(24, 209, COLOR_WHITE, g_packReinstall);
+            api->drawString(130, 209, COLOR_CYAN, g_packChangelog);
             api->drawString(24, ONLN_UPDATE_PROMPT_Y, COLOR_GRAY, g_updatePressBack);
             api->drawFlush();
             api->drawUnlock();
@@ -3820,6 +4070,14 @@ PLUGIN_CODE(onln) static bool PLUGIN_onln_RunPackDetails(const MENUOnlineApi *ap
             u32 pressed = api->waitInputWithTimeout(50);
             if (pressed & KEY_B)
                 return false;
+            if (pressed & KEY_X)
+            {
+                PLUGIN_onln_RunChangelog(api, pack);
+                if (*api->menuShouldExit)
+                    return false;
+                redraw = true;
+                continue;
+            }
             if (pressed & KEY_A)
                 return true;
             if ((pressed & KEY_DOWN) && first + visible < pack->componentCount)
@@ -4270,12 +4528,16 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_ActOnPack(
         if (!pack->outputComplete)
         {
             char target[ONLN_UPDATE_PATH_CAP];
-            if (!PLUGIN_onln_FindPackRebuildTarget(api, pack, target, sizeof(target)))
+            bool haveTarget = pack->outputExists ?
+                PLUGIN_onln_MakePluginPath(target, sizeof(target), pack->output) :
+                PLUGIN_onln_FindPackRebuildTarget(api, pack, target, sizeof(target));
+            if (!haveTarget)
                 return ONLN_PACK_BAD_FORMAT;
             PLUGIN_onln_DrawPackMessage(api, pack, g_packBuilding, 0);
             result = PLUGIN_onln_BuildPack(api, pack, target);
             if (R_FAILED(result))
                 return result;
+            pack->outputExists = true;
             pack->outputComplete = true;
             result = PLUGIN_onln_ScanSelected(api);
             if (R_FAILED(result))
@@ -4336,6 +4598,7 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_ActOnPack(
     result = PLUGIN_onln_BuildPack(api, pack, NULL);
     if (R_FAILED(result))
         return result;
+    pack->outputExists = true;
     pack->outputComplete = true;
     result = PLUGIN_onln_ScanSelected(api);
     if (R_FAILED(result))
@@ -4514,8 +4777,6 @@ finish:
 
 PLUGIN_MAIN(onln) void PLUGIN_onln_Main(const MENUOnlineApi *api)
 {
-    u32 selected = 0;
-
     if (!api ||
         api->version != MENU_ONLINE_API_VERSION ||
         !api->drawLock ||
@@ -4541,35 +4802,5 @@ PLUGIN_MAIN(onln) void PLUGIN_onln_Main(const MENUOnlineApi *api)
         return;
     }
 
-    PLUGIN_onln_DrawRoot(api, selected);
-    do
-    {
-        u32 pressed = api->waitInputWithTimeout(50);
-        if (pressed & KEY_B)
-            return;
-        if (pressed & KEY_DOWN)
-        {
-            u32 oldSelected = selected;
-            selected = selected < 1u ? selected + 1u : 0u;
-            PLUGIN_onln_RedrawRootSelection(api, oldSelected, selected);
-            continue;
-        }
-        if (pressed & KEY_UP)
-        {
-            u32 oldSelected = selected;
-            selected = selected ? selected - 1u : 1u;
-            PLUGIN_onln_RedrawRootSelection(api, oldSelected, selected);
-            continue;
-        }
-        if (pressed & KEY_A)
-        {
-            if (selected == 0)
-                PLUGIN_onln_RunUtc(api);
-            else
-                PLUGIN_onln_RunPacks(api);
-            if (*api->menuShouldExit)
-                return;
-            PLUGIN_onln_DrawRoot(api, selected);
-        }
-    } while (!*api->menuShouldExit);
+    PLUGIN_onln_RunPacks(api);
 }
