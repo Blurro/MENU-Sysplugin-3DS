@@ -153,7 +153,9 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageWasInBootSnapshot(
         u32 textEnd = pos;
         u32 end = pos < g_MENUManageChangeSize ? pos + 1u : pos;
         bool stateLine = textEnd >= start + 2u &&
-            (g_MENUManageChanges[start] == 'D' || g_MENUManageChanges[start] == 'E') &&
+            (g_MENUManageChanges[start] == 'D' ||
+             g_MENUManageChanges[start] == 'E' ||
+             g_MENUManageChanges[start] == 'P') &&
             g_MENUManageChanges[start + 1u] == '|';
         bool match = !stateLine && textEnd - start == wanted;
 
@@ -223,41 +225,6 @@ done:
     return success;
 }
 
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageSetChange(
-    const char *name,
-    bool disabled,
-    char state
-)
-{
-    u32 start = 0, end = 0;
-    char old = PLUGIN_MENU_ManageFindChange(name, disabled, &start, &end);
-
-    if (old)
-    {
-        u32 remove = end - start;
-        for (u32 i = end; i < g_MENUManageChangeSize; i++)
-            g_MENUManageChanges[i - remove] = g_MENUManageChanges[i];
-        g_MENUManageChangeSize -= remove;
-    }
-    if (state)
-    {
-        u32 length = PLUGIN_MENU_ManageCanonicalLength(name, disabled);
-        u32 need = length + 3u;
-        if (g_MENUManageChangeSize + need > MENU_MANAGE_TEMP_BYTES)
-            return false;
-
-        u32 pos = g_MENUManageChangeSize;
-        g_MENUManageChanges[pos++] = state;
-        g_MENUManageChanges[pos++] = '|';
-        for (u32 i = 0; i < length; i++)
-            g_MENUManageChanges[pos++] = name[i];
-        g_MENUManageChanges[pos++] = '\n';
-        g_MENUManageChangeSize = pos;
-    }
-
-    return PLUGIN_MENU_ManageSaveChanges();
-}
-
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_ManageResetTempList(void)
 {
     FS_Archive archive = 0;
@@ -322,6 +289,518 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageParseName(
     }
     *priority = value;
     return true;
+}
+
+
+typedef struct
+{
+    u32 base;
+    char *changes;
+    char *name;
+    char *otherName;
+    char *path;
+    char *otherPath;
+    u32 size;
+} PluginMenuSyspluginStateScratch;
+
+#define MENU_SYSPLUGIN_STATE_SCRATCH_SIZE 0x3000u
+
+PLUGIN_CODE(MENU) static const char *PLUGIN_MENU_SyspluginFilename(const char *pathOrName)
+{
+    const char *name = pathOrName;
+    if (!name)
+        return NULL;
+    for (const char *p = pathOrName; *p; p++)
+        if (*p == '/')
+            name = p + 1;
+    return name;
+}
+
+PLUGIN_CODE(MENU) static bool PLUGIN_MENU_SyspluginCopyName(char *out, u32 outSize, const char *pathOrName)
+{
+    const char *name = PLUGIN_MENU_SyspluginFilename(pathOrName);
+    u32 length;
+    if (!out || !outSize || !name || !*name)
+        return false;
+    length = PLUGIN_MENU_StringLength(name);
+    if (!length || length + 1u > outSize)
+        return false;
+    for (u32 i = 0; i <= length; i++)
+        out[i] = name[i];
+    return true;
+}
+
+PLUGIN_CODE(MENU) static bool PLUGIN_MENU_SyspluginStateAlloc(PluginMenuSyspluginStateScratch *scratch)
+{
+    u32 cursor;
+    if (!scratch || !PLUGIN_MENU_TempAlloc(MENU_SYSPLUGIN_STATE_SCRATCH_SIZE, &scratch->base))
+        return false;
+    scratch->changes = (char *)scratch->base;
+    cursor = scratch->base + MENU_MANAGE_TEMP_BYTES;
+    scratch->name = (char *)cursor;
+    cursor += 256u;
+    scratch->otherName = (char *)cursor;
+    cursor += 256u;
+    scratch->path = (char *)cursor;
+    cursor += 272u;
+    scratch->otherPath = (char *)cursor;
+    cursor += 272u;
+    scratch->size = 0;
+    if (cursor > scratch->base + MENU_SYSPLUGIN_STATE_SCRATCH_SIZE)
+    {
+        PLUGIN_MENU_TempFree(scratch->base, MENU_SYSPLUGIN_STATE_SCRATCH_SIZE);
+        scratch->base = 0;
+        return false;
+    }
+    return true;
+}
+
+PLUGIN_CODE(MENU) static void PLUGIN_MENU_SyspluginStateFree(PluginMenuSyspluginStateScratch *scratch)
+{
+    if (scratch && scratch->base)
+        PLUGIN_MENU_TempFree(scratch->base, MENU_SYSPLUGIN_STATE_SCRATCH_SIZE);
+    if (scratch)
+        scratch->base = 0;
+}
+
+PLUGIN_CODE(MENU) static bool PLUGIN_MENU_SyspluginStateLoad(PluginMenuSyspluginStateScratch *scratch)
+{
+    FS_Archive archive = 0;
+    Handle file = 0;
+    u64 size = 0;
+    bool success = false;
+
+    if (!scratch || !scratch->changes ||
+        R_FAILED(MENU_HOST__FSUSER_OpenArchive(
+            &archive,
+            ARCHIVE_SDMC,
+            MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
+        return false;
+
+    scratch->size = 0;
+    if (R_FAILED(MENU_HOST__FSUSER_OpenFile(
+            &file,
+            archive,
+            MENU_HOST__fsMakePath(PATH_ASCII, g_MENUManageTempListPath),
+            FS_OPEN_READ,
+            0)))
+    {
+        success = true;
+        goto done;
+    }
+
+    if (R_FAILED(MENU_HOST__FSFILE_GetSize(file, &size)) || size > MENU_MANAGE_TEMP_BYTES)
+        goto done;
+    if (size && !PLUGIN_MENU_ReadExact(file, 0, scratch->changes, (u32)size))
+        goto done;
+    scratch->size = (u32)size;
+    success = true;
+
+done:
+    if (file)
+        MENU_HOST__FSFILE_Close(file);
+    MENU_HOST__FSUSER_CloseArchive(archive);
+    return success;
+}
+
+PLUGIN_CODE(MENU) static bool PLUGIN_MENU_SyspluginStateSave(const PluginMenuSyspluginStateScratch *scratch)
+{
+    FS_Archive archive = 0;
+    Handle file = 0;
+    bool success = false;
+
+    if (!scratch || scratch->size > MENU_MANAGE_TEMP_BYTES ||
+        R_FAILED(MENU_HOST__FSUSER_OpenArchive(
+            &archive,
+            ARCHIVE_SDMC,
+            MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
+        return false;
+
+    (void)MENU_HOST__FSUSER_DeleteFile(
+        archive,
+        MENU_HOST__fsMakePath(PATH_ASCII, g_MENUManageTempListPath));
+
+    if (!scratch->size)
+    {
+        success = true;
+        goto done;
+    }
+
+    if (R_FAILED(MENU_HOST__FSUSER_OpenFile(
+            &file,
+            archive,
+            MENU_HOST__fsMakePath(PATH_ASCII, g_MENUManageTempListPath),
+            FS_OPEN_WRITE | FS_OPEN_CREATE,
+            0)) ||
+        R_FAILED(MENU_HOST__FSFILE_SetSize(file, scratch->size)) ||
+        !PLUGIN_MENU_WriteExact(file, 0, scratch->changes, scratch->size))
+        goto done;
+
+    success = true;
+
+done:
+    if (file)
+        MENU_HOST__FSFILE_Close(file);
+    MENU_HOST__FSUSER_CloseArchive(archive);
+    return success;
+}
+
+PLUGIN_CODE(MENU) static u32 PLUGIN_MENU_SyspluginCanonicalLength(const char *name, bool disabled)
+{
+    u32 length = PLUGIN_MENU_StringLength(name);
+    return disabled && length >= 2u ? length - 2u : length;
+}
+
+PLUGIN_CODE(MENU) static char PLUGIN_MENU_SyspluginFindChange(
+    const PluginMenuSyspluginStateScratch *scratch,
+    const char *name,
+    bool disabled,
+    u32 *lineStart,
+    u32 *lineEnd)
+{
+    u32 wanted = PLUGIN_MENU_SyspluginCanonicalLength(name, disabled);
+    u32 pos = 0;
+    while (pos < scratch->size)
+    {
+        u32 start = pos;
+        while (pos < scratch->size && scratch->changes[pos] != '\n')
+            pos++;
+        u32 textEnd = pos;
+        u32 end = pos < scratch->size ? pos + 1u : pos;
+        if (textEnd >= start + 2u &&
+            (scratch->changes[start] == 'D' || scratch->changes[start] == 'E') &&
+            scratch->changes[start + 1u] == '|')
+        {
+            u32 textStart = start + 2u;
+            u32 textLength = textEnd - textStart;
+            bool match = textLength == wanted;
+            for (u32 i = 0; match && i < wanted; i++)
+                if (scratch->changes[textStart + i] != name[i])
+                    match = false;
+            if (match)
+            {
+                if (lineStart) *lineStart = start;
+                if (lineEnd) *lineEnd = end;
+                return scratch->changes[start];
+            }
+        }
+        pos = end;
+    }
+    return 0;
+}
+
+PLUGIN_CODE(MENU) static bool PLUGIN_MENU_SyspluginFindPending(
+    const PluginMenuSyspluginStateScratch *scratch,
+    const char *name,
+    bool disabled,
+    u32 *lineStart,
+    u32 *lineEnd)
+{
+    u32 wanted = PLUGIN_MENU_SyspluginCanonicalLength(name, disabled);
+    u32 pos = 0;
+    while (pos < scratch->size)
+    {
+        u32 start = pos;
+        while (pos < scratch->size && scratch->changes[pos] != '\n')
+            pos++;
+        u32 textEnd = pos;
+        u32 end = pos < scratch->size ? pos + 1u : pos;
+        if (textEnd >= start + 2u && scratch->changes[start] == 'P' &&
+            scratch->changes[start + 1u] == '|')
+        {
+            u32 textStart = start + 2u;
+            u32 textLength = textEnd - textStart;
+            bool match = textLength == wanted;
+            for (u32 i = 0; match && i < wanted; i++)
+                if (scratch->changes[textStart + i] != name[i])
+                    match = false;
+            if (match)
+            {
+                if (lineStart) *lineStart = start;
+                if (lineEnd) *lineEnd = end;
+                return true;
+            }
+        }
+        pos = end;
+    }
+    return false;
+}
+
+PLUGIN_CODE(MENU) static bool PLUGIN_MENU_SyspluginWasInBootSnapshot(
+    const PluginMenuSyspluginStateScratch *scratch,
+    const char *name,
+    bool disabled)
+{
+    u32 wanted = PLUGIN_MENU_SyspluginCanonicalLength(name, disabled);
+    u32 pos = 0;
+    while (pos < scratch->size)
+    {
+        u32 start = pos;
+        while (pos < scratch->size && scratch->changes[pos] != '\n')
+            pos++;
+        u32 textEnd = pos;
+        u32 end = pos < scratch->size ? pos + 1u : pos;
+        bool stateLine = textEnd >= start + 2u &&
+            (scratch->changes[start] == 'D' ||
+             scratch->changes[start] == 'E' ||
+             scratch->changes[start] == 'P') &&
+            scratch->changes[start + 1u] == '|';
+        bool match = !stateLine && textEnd - start == wanted;
+        for (u32 i = 0; match && i < wanted; i++)
+            if (scratch->changes[start + i] != name[i])
+                match = false;
+        if (match)
+            return true;
+        pos = end;
+    }
+    return false;
+}
+
+PLUGIN_CODE(MENU) static void PLUGIN_MENU_SyspluginRemoveLine(
+    PluginMenuSyspluginStateScratch *scratch,
+    u32 start,
+    u32 end)
+{
+    u32 remove = end - start;
+    for (u32 i = end; i < scratch->size; i++)
+        scratch->changes[i - remove] = scratch->changes[i];
+    scratch->size -= remove;
+}
+
+PLUGIN_CODE(MENU) static bool PLUGIN_MENU_SyspluginSetChange(
+    PluginMenuSyspluginStateScratch *scratch,
+    const char *name,
+    bool disabled,
+    char state)
+{
+    u32 start = 0, end = 0;
+    char old = PLUGIN_MENU_SyspluginFindChange(scratch, name, disabled, &start, &end);
+    if (old)
+        PLUGIN_MENU_SyspluginRemoveLine(scratch, start, end);
+    if (state)
+    {
+        u32 length = PLUGIN_MENU_SyspluginCanonicalLength(name, disabled);
+        u32 need = length + 3u;
+        if (!length || scratch->size + need > MENU_MANAGE_TEMP_BYTES)
+            return false;
+        u32 pos = scratch->size;
+        scratch->changes[pos++] = state;
+        scratch->changes[pos++] = '|';
+        for (u32 i = 0; i < length; i++)
+            scratch->changes[pos++] = name[i];
+        scratch->changes[pos++] = '\n';
+        scratch->size = pos;
+    }
+    return true;
+}
+
+PLUGIN_CODE(MENU) static bool PLUGIN_MENU_SyspluginSetPending(
+    PluginMenuSyspluginStateScratch *scratch,
+    const char *name,
+    bool disabled,
+    bool pending)
+{
+    u32 start = 0, end = 0;
+    bool old = PLUGIN_MENU_SyspluginFindPending(scratch, name, disabled, &start, &end);
+    if (old)
+        PLUGIN_MENU_SyspluginRemoveLine(scratch, start, end);
+    if (pending)
+    {
+        u32 length = PLUGIN_MENU_SyspluginCanonicalLength(name, disabled);
+        u32 need = length + 3u;
+        if (!length || scratch->size + need > MENU_MANAGE_TEMP_BYTES)
+            return false;
+        u32 pos = scratch->size;
+        scratch->changes[pos++] = 'P';
+        scratch->changes[pos++] = '|';
+        for (u32 i = 0; i < length; i++)
+            scratch->changes[pos++] = name[i];
+        scratch->changes[pos++] = '\n';
+        scratch->size = pos;
+    }
+    return true;
+}
+
+PLUGIN_CODE(MENU) static bool PLUGIN_MENU_SyspluginFileExists(const char *path)
+{
+    FS_Archive archive = 0;
+    Handle file = 0;
+    bool exists = false;
+    if (R_FAILED(MENU_HOST__FSUSER_OpenArchive(
+            &archive,
+            ARCHIVE_SDMC,
+            MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
+        return false;
+    if (R_SUCCEEDED(MENU_HOST__FSUSER_OpenFile(
+            &file,
+            archive,
+            MENU_HOST__fsMakePath(PATH_ASCII, path),
+            FS_OPEN_READ,
+            0)))
+    {
+        exists = true;
+        MENU_HOST__FSFILE_Close(file);
+    }
+    MENU_HOST__FSUSER_CloseArchive(archive);
+    return exists;
+}
+
+PLUGIN_CODE(MENU) static bool PLUGIN_MENU_SyspluginRenameFile(const char *oldPath, const char *newPath)
+{
+    FS_Archive archive = 0;
+    Result result;
+    if (R_FAILED(MENU_HOST__FSUSER_OpenArchive(
+            &archive,
+            ARCHIVE_SDMC,
+            MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
+        return false;
+    result = MENU_HOST__FSUSER_RenameFile(
+        archive,
+        MENU_HOST__fsMakePath(PATH_ASCII, oldPath),
+        archive,
+        MENU_HOST__fsMakePath(PATH_ASCII, newPath));
+    MENU_HOST__FSUSER_CloseArchive(archive);
+    return R_SUCCEEDED(result);
+}
+
+PLUGIN_CODE(MENU) bool PLUGIN_MENU_AddSysplugin(const char *pathOrName)
+{
+    PluginMenuSyspluginStateScratch scratch;
+    scratch.base = 0;
+    u32 priority = 0;
+    bool disabled = false;
+    bool success = false;
+
+    PLUGIN_MENU_LockWord(&g_MENUSyspluginStateLock);
+    if (!PLUGIN_MENU_SyspluginStateAlloc(&scratch) ||
+        !PLUGIN_MENU_SyspluginCopyName(scratch.name, 256u, pathOrName) ||
+        !PLUGIN_MENU_ManageParseName(scratch.name, &priority, &disabled) ||
+        !PLUGIN_MENU_MakePluginPathTo(scratch.path, 272u, scratch.name) ||
+        !PLUGIN_MENU_SyspluginFileExists(scratch.path) ||
+        !PLUGIN_MENU_SyspluginStateLoad(&scratch) ||
+        !PLUGIN_MENU_SyspluginSetPending(&scratch, scratch.name, disabled, true))
+        goto done;
+    success = PLUGIN_MENU_SyspluginStateSave(&scratch);
+
+done:
+    PLUGIN_MENU_SyspluginStateFree(&scratch);
+    PLUGIN_MENU_UnlockWord(&g_MENUSyspluginStateLock);
+    return success;
+}
+
+PLUGIN_CODE(MENU) static bool PLUGIN_MENU_SetSyspluginDisabled(const char *pathOrName, bool disable)
+{
+    PluginMenuSyspluginStateScratch scratch;
+    scratch.base = 0;
+    u32 priority = 0;
+    bool disabled = false;
+    bool success = false;
+    char existing;
+    bool wasEnabledAtBoot;
+    char nextState;
+    u32 length;
+
+    PLUGIN_MENU_LockWord(&g_MENUSyspluginStateLock);
+    if (!PLUGIN_MENU_SyspluginStateAlloc(&scratch) ||
+        !PLUGIN_MENU_SyspluginCopyName(scratch.name, 256u, pathOrName) ||
+        !PLUGIN_MENU_ManageParseName(scratch.name, &priority, &disabled) ||
+        disabled == disable ||
+        !PLUGIN_MENU_SyspluginStateLoad(&scratch))
+        goto done;
+
+    length = PLUGIN_MENU_StringLength(scratch.name);
+    if (disable)
+    {
+        if (length + 3u > 256u)
+            goto done;
+        for (u32 i = 0; i < length; i++) scratch.otherName[i] = scratch.name[i];
+        scratch.otherName[length] = '.';
+        scratch.otherName[length + 1u] = 'd';
+        scratch.otherName[length + 2u] = 0;
+    }
+    else
+    {
+        if (length < 2u || scratch.name[length - 2u] != '.' || scratch.name[length - 1u] != 'd')
+            goto done;
+        for (u32 i = 0; i < length - 2u; i++) scratch.otherName[i] = scratch.name[i];
+        scratch.otherName[length - 2u] = 0;
+    }
+
+    existing = PLUGIN_MENU_SyspluginFindChange(&scratch, scratch.name, disabled, NULL, NULL);
+    wasEnabledAtBoot = existing == 'E' ||
+        (existing != 'D' && PLUGIN_MENU_SyspluginWasInBootSnapshot(&scratch, scratch.name, disabled));
+    nextState = disable ? (wasEnabledAtBoot ? 'E' : 0) : (wasEnabledAtBoot ? 0 : 'D');
+
+    if (!PLUGIN_MENU_SyspluginSetPending(&scratch, scratch.name, disabled, false) ||
+        !PLUGIN_MENU_SyspluginSetChange(&scratch, scratch.name, disabled, nextState) ||
+        !PLUGIN_MENU_MakePluginPathTo(scratch.path, 272u, scratch.name) ||
+        !PLUGIN_MENU_MakePluginPathTo(scratch.otherPath, 272u, scratch.otherName) ||
+        PLUGIN_MENU_SyspluginFileExists(scratch.otherPath) ||
+        !PLUGIN_MENU_SyspluginRenameFile(scratch.path, scratch.otherPath))
+        goto done;
+
+    if (!PLUGIN_MENU_SyspluginStateSave(&scratch))
+    {
+        (void)PLUGIN_MENU_SyspluginRenameFile(scratch.otherPath, scratch.path);
+        goto done;
+    }
+    success = true;
+
+done:
+    PLUGIN_MENU_SyspluginStateFree(&scratch);
+    PLUGIN_MENU_UnlockWord(&g_MENUSyspluginStateLock);
+    return success;
+}
+
+PLUGIN_CODE(MENU) bool PLUGIN_MENU_DisableSysplugin(const char *name)
+{
+    return PLUGIN_MENU_SetSyspluginDisabled(name, true);
+}
+
+PLUGIN_CODE(MENU) bool PLUGIN_MENU_EnableSysplugin(const char *name)
+{
+    return PLUGIN_MENU_SetSyspluginDisabled(name, false);
+}
+
+PLUGIN_CODE(MENU) bool PLUGIN_MENU_DeleteSysplugin(const char *pathOrName)
+{
+    PluginMenuSyspluginStateScratch scratch;
+    scratch.base = 0;
+    FS_Archive archive = 0;
+    u32 priority = 0;
+    bool disabled = false;
+    bool success = false;
+    Result result;
+
+    PLUGIN_MENU_LockWord(&g_MENUSyspluginStateLock);
+    if (!PLUGIN_MENU_SyspluginStateAlloc(&scratch) ||
+        !PLUGIN_MENU_SyspluginCopyName(scratch.name, 256u, pathOrName) ||
+        !PLUGIN_MENU_ManageParseName(scratch.name, &priority, &disabled) ||
+        !PLUGIN_MENU_SyspluginStateLoad(&scratch) ||
+        !PLUGIN_MENU_SyspluginSetChange(&scratch, scratch.name, disabled, 0) ||
+        !PLUGIN_MENU_SyspluginSetPending(&scratch, scratch.name, disabled, false) ||
+        !PLUGIN_MENU_MakePluginPathTo(scratch.path, 272u, scratch.name) ||
+        R_FAILED(MENU_HOST__FSUSER_OpenArchive(
+            &archive,
+            ARCHIVE_SDMC,
+            MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
+        goto done;
+
+    result = MENU_HOST__FSUSER_DeleteFile(
+        archive,
+        MENU_HOST__fsMakePath(PATH_ASCII, scratch.path));
+    MENU_HOST__FSUSER_CloseArchive(archive);
+    archive = 0;
+    if (R_FAILED(result))
+        goto done;
+    success = PLUGIN_MENU_SyspluginStateSave(&scratch);
+
+done:
+    if (archive)
+        MENU_HOST__FSUSER_CloseArchive(archive);
+    PLUGIN_MENU_SyspluginStateFree(&scratch);
+    PLUGIN_MENU_UnlockWord(&g_MENUSyspluginStateLock);
+    return success;
 }
 
 PLUGIN_CODE(MENU) static const char *PLUGIN_MENU_ManageName(const PluginMenuManageFile *file)
@@ -1061,86 +1540,20 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_ManageDrawActionsPage(
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageRename(PluginMenuManageFile *item)
 {
     const char *name = PLUGIN_MENU_ManageName(item);
-    u32 length = PLUGIN_MENU_StringLength(name);
-    bool disabling = !item->currentDisabled;
-
-    if (length + (disabling ? 3u : 1u) > sizeof(g_MENUBestName))
-        return false;
-
-    if (disabling)
-    {
-        for (u32 i = 0; i < length; i++) g_MENUBestName[i] = name[i];
-        g_MENUBestName[length] = '.';
-        g_MENUBestName[length + 1u] = 'd';
-        g_MENUBestName[length + 2u] = 0;
-    }
-    else
-    {
-        if (length < 2u || name[length - 2u] != '.' || name[length - 1u] != 'd')
-            return false;
-        for (u32 i = 0; i < length - 2u; i++) g_MENUBestName[i] = name[i];
-        g_MENUBestName[length - 2u] = 0;
-    }
-
-    u32 changeStart = 0, changeEnd = 0;
-    char existing = PLUGIN_MENU_ManageFindChange(
-        name, item->currentDisabled, &changeStart, &changeEnd);
-    bool wasEnabledAtBoot = existing == 'E' ||
-        (existing != 'D' &&
-         PLUGIN_MENU_ManageWasInBootSnapshot(name, item->currentDisabled));
-    char nextState = disabling ? (wasEnabledAtBoot ? 'E' : 0) :
-                                 (wasEnabledAtBoot ? 0 : 'D');
-    u32 remove = existing ? changeEnd - changeStart : 0u;
-    u32 add = nextState ?
-        PLUGIN_MENU_ManageCanonicalLength(name, item->currentDisabled) + 3u : 0u;
-    if (g_MENUManageChangeSize - remove + add > MENU_MANAGE_TEMP_BYTES)
-        return false;
-
-    if (!PLUGIN_MENU_MakePluginPathTo(g_MENUScanPath, sizeof(g_MENUScanPath), name) ||
-        !PLUGIN_MENU_MakePluginPathTo(g_MENUScanAltPath, sizeof(g_MENUScanAltPath), g_MENUBestName))
-        return false;
-
-    FS_Archive archive = 0;
-    if (R_FAILED(MENU_HOST__FSUSER_OpenArchive(
-            &archive,
-            ARCHIVE_SDMC,
-            MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
-        return false;
-
-    Result rc = MENU_HOST__FSUSER_RenameFile(
-        archive,
-        MENU_HOST__fsMakePath(PATH_ASCII, g_MENUScanPath),
-        archive,
-        MENU_HOST__fsMakePath(PATH_ASCII, g_MENUScanAltPath));
-    MENU_HOST__FSUSER_CloseArchive(archive);
-    if (R_FAILED(rc))
-        return false;
-
-    return PLUGIN_MENU_ManageSetChange(name, item->currentDisabled, nextState);
+    bool success = item->currentDisabled ?
+        PLUGIN_MENU_EnableSysplugin(name) :
+        PLUGIN_MENU_DisableSysplugin(name);
+    if (success)
+        PLUGIN_MENU_ManageLoadChanges();
+    return success;
 }
 
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageDeleteFile(PluginMenuManageFile *item)
 {
-    const char *name = PLUGIN_MENU_ManageName(item);
-    if (!PLUGIN_MENU_MakePluginPath(name))
-        return false;
-
-    FS_Archive archive = 0;
-    if (R_FAILED(MENU_HOST__FSUSER_OpenArchive(
-            &archive,
-            ARCHIVE_SDMC,
-            MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
-        return false;
-    Result rc = MENU_HOST__FSUSER_DeleteFile(
-        archive,
-        MENU_HOST__fsMakePath(PATH_ASCII, g_MENUScanPath));
-    MENU_HOST__FSUSER_CloseArchive(archive);
-    if (R_FAILED(rc))
-        return false;
-
-    if (PLUGIN_MENU_ManageFindChange(name, item->currentDisabled, NULL, NULL))
-        return PLUGIN_MENU_ManageSetChange(name, item->currentDisabled, 0);
-    return true;
+    bool success = PLUGIN_MENU_DeleteSysplugin(PLUGIN_MENU_ManageName(item));
+    if (success)
+        PLUGIN_MENU_ManageLoadChanges();
+    return success;
 }
 
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageActions(u32 fileIndex)

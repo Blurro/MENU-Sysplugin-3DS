@@ -8,7 +8,8 @@
 #define PLUGIN_DATA(id)   __attribute__((section(".plugindata_" #id), used))
 #define PLUGIN_BSS(id)    __attribute__((section(".pluginbss_" #id), used))
 
-#define MENU_ONLINE_API_VERSION 5u
+#define MENU_ONLINE_API_VERSION 6u
+#define MENU_ONLINE_API_MIN_VERSION 5u
 #define MENU_ONLINE_BORDER_COLOR RGB8_to_565(65, 105, 225)
 #define MENU_ONLINE_TITLE_COLOR COLOR_CYAN
 #define MENU_ONLINE_DIR_NAME_CAP 256u
@@ -54,6 +55,10 @@ typedef struct
         u32 *entriesVisited
     );
     const char *sourceUrlPrefix;
+    bool (*addSysplugin)(const char *name);
+    bool (*disableSysplugin)(const char *name);
+    bool (*enableSysplugin)(const char *name);
+    bool (*deleteSysplugin)(const char *name);
 } MENUOnlineApi;
 
 PLUGIN_RODATA(onln) static const char g_onlineCursor[] = ">";
@@ -61,6 +66,19 @@ PLUGIN_RODATA(onln) static const char g_onlineResultPrefix[] = "result: 0x";
 PLUGIN_RODATA(onln) static const char g_onlineHexDigits[] = "0123456789ABCDEF";
 PLUGIN_RODATA(onln) static const char g_onlinePlus[] = "+";
 PLUGIN_RODATA(onln) static const char g_onlinePipe[] = "|";
+
+#define ONLN_MENU_PLUGIN_ID 0x554E454Du
+
+PLUGIN_RODATA(onln) static const char g_bigUpdateTitle[] = "Big update needed!";
+PLUGIN_RODATA(onln) static const char g_bigUpdateLine1[] = "The MENU plugin has been updated with new API";
+PLUGIN_RODATA(onln) static const char g_bigUpdateLine2[] = "functions and Online Menu compatibility.";
+PLUGIN_RODATA(onln) static const char g_bigUpdateLine3[] = "Some plugins will need you to update them";
+PLUGIN_RODATA(onln) static const char g_bigUpdateLine4[] = "afterwards, and will not load until you do so.";
+PLUGIN_RODATA(onln) static const char g_bigUpdateQuestion[] = "Update MENU plugin?";
+PLUGIN_RODATA(onln) static const char g_bigUpdateAccept[] = "A: Update";
+PLUGIN_RODATA(onln) static const char g_bigUpdateLeave[] = "B: Leave";
+PLUGIN_RODATA(onln) static const char g_bigUpdateUpdating[] = "Updating MENU plugin...";
+PLUGIN_RODATA(onln) static const char g_bigUpdateFailed[] = "MENU update failed";
 
 PLUGIN_RODATA(onln) static const char g_updateTitle[] = "Available Sysplugin Updates";
 PLUGIN_RODATA(onln) static const char g_updateManifestName[] = "plgpacks.txt";
@@ -83,7 +101,7 @@ PLUGIN_RODATA(onln) static const char g_updateRecovering[] = "Checking interrupt
 PLUGIN_RODATA(onln) static const char g_updateRecoverFailed[] = "Recovery of old update failed";
 PLUGIN_RODATA(onln) static const char g_updateUpdatedLabel[] = "Updated: ";
 PLUGIN_RODATA(onln) static const char g_updateFailedLabel[] = "Failed: ";
-PLUGIN_RODATA(onln) static const char g_updateRestart[] = "Reboot to load installed sysplugins";
+PLUGIN_RODATA(onln) static const char g_updateRestart[] = "Reboot to load installed Sysplugins";
 PLUGIN_RODATA(onln) static const char g_updatePressBack[] = "B: go back";
 PLUGIN_RODATA(onln) static const char g_updateShowAll[] = "Y: Show all";
 PLUGIN_RODATA(onln) static const char g_updateShowUpdates[] = "Y: Show only updates";
@@ -201,10 +219,12 @@ PLUGIN_RODATA(onln) static const u32 g_updateDecimalPowers[] = {
 #define ONLN_PACK_DESC_MAX_LINES 8u
 #define ONLN_PACK_DESC_LINE_MAX 46u
 #define ONLN_PACK_MANIFEST_MAX 0x8000u
-#define ONLN_PACK_STATE_GREEN 0u
-#define ONLN_PACK_STATE_WHITE 1u
-#define ONLN_PACK_STATE_RED 2u
-#define ONLN_PACK_STATE_BLUE 3u
+#define ONLN_PACK_STATE_YELLOW 0u
+#define ONLN_PACK_STATE_GREEN 1u
+#define ONLN_PACK_STATE_WHITE 2u
+#define ONLN_PACK_STATE_RED 3u
+#define ONLN_PACK_STATE_BLUE 4u
+#define ONLN_PACK_PENDING_COLOR RGB565(31, 63, 20)
 #define ONLN_PACK_MISSING_COLOR RGB8_to_565(120, 175, 255)
 #define ONLN_PACK_BAD_FORMAT ((Result)0xD8A0A092u)
 #define ONLN_CHANGE_MAX_ENTRIES 32u
@@ -298,6 +318,7 @@ typedef struct
     u8 componentCount;
     bool outputComplete;
     bool outputExists;
+    bool pendingReboot;
 } OnlnPack;
 
 typedef struct
@@ -820,7 +841,9 @@ PLUGIN_CODE(onln) static bool PLUGIN_onln_WasInBootSnapshot(
         u32 textEnd = pos;
         u32 end = pos < changeSize ? pos + 1u : pos;
         bool stateLine = textEnd >= start + 2u &&
-            ((char)g_updateIo[start] == 'D' || (char)g_updateIo[start] == 'E') &&
+            ((char)g_updateIo[start] == 'D' ||
+             (char)g_updateIo[start] == 'E' ||
+             (char)g_updateIo[start] == 'P') &&
             g_updateIo[start + 1u] == '|';
         bool match = !stateLine && textEnd - start == wanted;
         for (u32 i = 0; match && i < wanted; i++)
@@ -831,6 +854,47 @@ PLUGIN_CODE(onln) static bool PLUGIN_onln_WasInBootSnapshot(
         pos = end;
     }
     return false;
+}
+
+PLUGIN_CODE(onln) static bool PLUGIN_onln_ManageHasPending(
+    const char *name, u32 changeSize)
+{
+    u32 wanted = PLUGIN_onln_CanonicalPluginNameLength(name);
+    u32 pos = 0;
+    while (pos < changeSize)
+    {
+        u32 start = pos;
+        while (pos < changeSize && g_updateIo[pos] != '\n')
+            pos++;
+        u32 textEnd = pos;
+        u32 end = pos < changeSize ? pos + 1u : pos;
+        if (textEnd >= start + 2u &&
+            (char)g_updateIo[start] == 'P' &&
+            g_updateIo[start + 1u] == '|')
+        {
+            u32 textStart = start + 2u;
+            u32 textLength = textEnd - textStart;
+            bool match = textLength == wanted;
+            for (u32 i = 0; match && i < wanted; i++)
+                if ((char)g_updateIo[textStart + i] != name[i])
+                    match = false;
+            if (match)
+                return true;
+        }
+        pos = end;
+    }
+    return false;
+}
+
+PLUGIN_CODE(onln) static const char *PLUGIN_onln_PathFilename(const char *path)
+{
+    const char *name = path;
+    if (!path)
+        return NULL;
+    for (const char *p = path; *p; p++)
+        if (*p == '/')
+            name = p + 1;
+    return name;
 }
 
 PLUGIN_CODE(onln) static bool PLUGIN_onln_ManageBootActive(
@@ -3402,13 +3466,35 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_ParsePackManifest(const MENUOnlineAp
     }
     if (!g_packCount)
         return ONLN_PACK_BAD_FORMAT;
-    for (u32 i = 0; i < g_packCount; i++)
     {
-        char outputPath[ONLN_UPDATE_PATH_CAP];
-        g_packs[i].outputExists =
-            PLUGIN_onln_MakePluginPath(outputPath, sizeof(outputPath), g_packs[i].output) &&
-            PLUGIN_onln_FileExists(api, outputPath);
-        g_packs[i].outputComplete = PLUGIN_onln_PackOutputComplete(api, &g_packs[i]);
+        u32 changeSize = 0;
+        Result changesResult = PLUGIN_onln_LoadManageChanges(api, &changeSize);
+        if (R_FAILED(changesResult))
+            return changesResult;
+        for (u32 i = 0; i < g_packCount; i++)
+        {
+            char outputPath[ONLN_UPDATE_PATH_CAP];
+            OnlnPack *pack = &g_packs[i];
+            pack->outputExists =
+                PLUGIN_onln_MakePluginPath(outputPath, sizeof(outputPath), pack->output) &&
+                PLUGIN_onln_FileExists(api, outputPath);
+            pack->outputComplete = PLUGIN_onln_PackOutputComplete(api, pack);
+            pack->pendingReboot = PLUGIN_onln_ManageHasPending(pack->output, changeSize);
+            if (!pack->pendingReboot)
+            {
+                for (u32 j = 0; j < pack->componentCount; j++)
+                {
+                    OnlnSelectedPlugin *local = PLUGIN_onln_FindSelected(
+                        pack->components[j].magic, pack->components[j].plgid);
+                    if (local && PLUGIN_onln_ManageHasPending(
+                            PLUGIN_onln_PathFilename(local->path), changeSize))
+                    {
+                        pack->pendingReboot = true;
+                        break;
+                    }
+                }
+            }
+        }
     }
     return 0;
 }
@@ -3420,6 +3506,8 @@ PLUGIN_CODE(onln) static u32 PLUGIN_onln_PackState(const OnlnPack *pack)
     bool hasOlder = false;
     if (!pack)
         return ONLN_PACK_STATE_WHITE;
+    if (pack->pendingReboot && pack->outputComplete)
+        return ONLN_PACK_STATE_YELLOW;
     for (u32 i = 0; i < pack->componentCount; i++)
     {
         const OnlnStackId *id = &pack->components[i];
@@ -3448,6 +3536,8 @@ PLUGIN_CODE(onln) static u32 PLUGIN_onln_PackState(const OnlnPack *pack)
 
 PLUGIN_CODE(onln) static u16 PLUGIN_onln_PackColor(u32 state)
 {
+    if (state == ONLN_PACK_STATE_YELLOW)
+        return ONLN_PACK_PENDING_COLOR;
     if (state == ONLN_PACK_STATE_GREEN)
         return ONLN_UPDATE_NEWER_COLOR;
     if (state == ONLN_PACK_STATE_RED)
@@ -3460,13 +3550,13 @@ PLUGIN_CODE(onln) static u16 PLUGIN_onln_PackColor(u32 state)
 PLUGIN_CODE(onln) static bool PLUGIN_onln_PackVisible(const OnlnPack *pack, bool showAll)
 {
     u32 state = PLUGIN_onln_PackState(pack);
-    return showAll || state == ONLN_PACK_STATE_GREEN || state == ONLN_PACK_STATE_BLUE;
+    return showAll || state == ONLN_PACK_STATE_YELLOW || state == ONLN_PACK_STATE_GREEN || state == ONLN_PACK_STATE_BLUE;
 }
 
 PLUGIN_CODE(onln) static u32 PLUGIN_onln_CountPacks(bool showAll)
 {
     u32 count = 0;
-    for (u32 state = ONLN_PACK_STATE_GREEN; state <= ONLN_PACK_STATE_BLUE; state++)
+    for (u32 state = ONLN_PACK_STATE_YELLOW; state <= ONLN_PACK_STATE_BLUE; state++)
         for (u32 i = 0; i < g_packCount; i++)
             if (PLUGIN_onln_PackVisible(&g_packs[i], showAll) && PLUGIN_onln_PackState(&g_packs[i]) == state)
                 count++;
@@ -3475,7 +3565,7 @@ PLUGIN_CODE(onln) static u32 PLUGIN_onln_CountPacks(bool showAll)
 
 PLUGIN_CODE(onln) static OnlnPack *PLUGIN_onln_GetPack(u32 index, bool showAll)
 {
-    for (u32 state = ONLN_PACK_STATE_GREEN; state <= ONLN_PACK_STATE_BLUE; state++)
+    for (u32 state = ONLN_PACK_STATE_YELLOW; state <= ONLN_PACK_STATE_BLUE; state++)
     {
         for (u32 i = 0; i < g_packCount; i++)
         {
@@ -3558,7 +3648,7 @@ PLUGIN_CODE(onln) static void PLUGIN_onln_RedrawPackSelection(
 }
 
 PLUGIN_CODE(onln) static bool PLUGIN_onln_BuildPackComponentLine(
-    const OnlnStackId *id, char *out, u32 outSize)
+    const OnlnPack *pack, const OnlnStackId *id, char *out, u32 outSize)
 {
     OnlnSelectedPlugin *local;
     OnlnRemotePlugin *remote;
@@ -3572,8 +3662,13 @@ PLUGIN_CODE(onln) static bool PLUGIN_onln_BuildPackComponentLine(
     remote = PLUGIN_onln_FindRemote(id->magic, id->plgid);
     if (!remote || !PLUGIN_onln_FormatVersionText(remoteVersion, sizeof(remoteVersion), remote->version))
         return false;
-    if (local && local->hasLocalVersion &&
-        !PLUGIN_onln_FormatVersionText(localVersion, sizeof(localVersion), local->localVersion))
+    if (pack && pack->pendingReboot && pack->outputComplete)
+    {
+        if (!PLUGIN_onln_FormatVersionText(localVersion, sizeof(localVersion), remote->version))
+            return false;
+    }
+    else if (local && local->hasLocalVersion &&
+             !PLUGIN_onln_FormatVersionText(localVersion, sizeof(localVersion), local->localVersion))
         return false;
     out[0] = 0;
     return PLUGIN_onln_AppendId(out, outSize, &pos, id->plgid) &&
@@ -3582,16 +3677,19 @@ PLUGIN_CODE(onln) static bool PLUGIN_onln_BuildPackComponentLine(
            PLUGIN_onln_AppendText(out, outSize, &pos, PLUGIN_onln_ModuleName(id->magic)) &&
            PLUGIN_onln_AppendText(out, outSize, &pos, g_updateCloseModule) &&
            PLUGIN_onln_AppendText(out, outSize, &pos,
-                                  !local ? g_packNotInstalled :
-                                  (local->hasLocalVersion ? localVersion : g_updateNullVersion)) &&
+                                  (pack && pack->pendingReboot && pack->outputComplete) ? localVersion :
+                                  (!local ? g_packNotInstalled :
+                                   (local->hasLocalVersion ? localVersion : g_updateNullVersion))) &&
            PLUGIN_onln_AppendText(out, outSize, &pos, g_updateArrow) &&
            PLUGIN_onln_AppendText(out, outSize, &pos, remoteVersion);
 }
 
-PLUGIN_CODE(onln) static u16 PLUGIN_onln_PackComponentColor(const OnlnStackId *id)
+PLUGIN_CODE(onln) static u16 PLUGIN_onln_PackComponentColor(const OnlnPack *pack, const OnlnStackId *id)
 {
     OnlnSelectedPlugin *local = PLUGIN_onln_FindSelected(id->magic, id->plgid);
     OnlnRemotePlugin *remote = PLUGIN_onln_FindRemote(id->magic, id->plgid);
+    if (pack && pack->pendingReboot && pack->outputComplete)
+        return COLOR_WHITE;
     if (!local)
         return ONLN_PACK_MISSING_COLOR;
     if (!remote)
@@ -4048,9 +4146,9 @@ PLUGIN_CODE(onln) static bool PLUGIN_onln_RunPackDetails(const MENUOnlineApi *ap
             for (u32 i = 0; i < shown; i++)
             {
                 const OnlnStackId *id = &pack->components[first + i];
-                if (PLUGIN_onln_BuildPackComponentLine(id, g_packLine, sizeof(g_packLine)))
+                if (PLUGIN_onln_BuildPackComponentLine(pack, id, g_packLine, sizeof(g_packLine)))
                     api->drawString(24, componentTopY + i * ONLN_UPDATE_ITEM_SPACING_Y,
-                                    PLUGIN_onln_PackComponentColor(id), g_packLine);
+                                    PLUGIN_onln_PackComponentColor(pack, id), g_packLine);
             }
             if (first + shown < pack->componentCount)
                 api->drawString(280, 198, COLOR_GRAY, g_updateDots);
@@ -4246,6 +4344,20 @@ PLUGIN_CODE(onln) static void PLUGIN_onln_DrawPackMessage(
     api->drawUnlock();
 }
 
+PLUGIN_CODE(onln) static void PLUGIN_onln_DrawPackReboot(
+    const MENUOnlineApi *api, const OnlnPack *pack)
+{
+    api->drawLock();
+    api->drawClear();
+    PLUGIN_onln_DrawPackFrame(api);
+    if (pack)
+        api->drawString(20, 42, ONLN_PACK_PENDING_COLOR, pack->title);
+    api->drawString(20, 68, COLOR_YELLOW, g_updateRestart);
+    api->drawString(20, 120, COLOR_GRAY, g_updatePressBack);
+    api->drawFlush();
+    api->drawUnlock();
+}
+
 PLUGIN_CODE(onln) static void PLUGIN_onln_DrawPackOutsideError(const MENUOnlineApi *api, const OnlnPack *pack)
 {
     api->drawLock();
@@ -4394,7 +4506,7 @@ PLUGIN_CODE(onln) static void PLUGIN_onln_DrawPackProgress(
 }
 
 PLUGIN_CODE(onln) static Result PLUGIN_onln_UpdatePackComponents(
-    const MENUOnlineApi *api, const OnlnPack *pack, bool force)
+    const MENUOnlineApi *api, OnlnPack *pack, bool force)
 {
     u32 total = 0;
     u32 position = 0;
@@ -4442,6 +4554,9 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_UpdatePackComponents(
             return result;
         }
         PLUGIN_onln_MarkInstalled(local);
+        if (!api->addSysplugin || !api->addSysplugin(local->path))
+            return ONLN_UPDATE_BAD_FILE;
+        pack->pendingReboot = true;
     }
     return 0;
 }
@@ -4518,11 +4633,153 @@ finish:
     return result;
 }
 
+
+PLUGIN_CODE(onln) static bool PLUGIN_onln_HasSyspluginManageApi(const MENUOnlineApi *api)
+{
+    return api && api->version >= MENU_ONLINE_API_VERSION &&
+           api->addSysplugin && api->disableSysplugin &&
+           api->enableSysplugin && api->deleteSysplugin;
+}
+
+PLUGIN_CODE(onln) static void PLUGIN_onln_DrawBigUpdateFrame(const MENUOnlineApi *api)
+{
+    api->drawString(10, 8, MENU_ONLINE_BORDER_COLOR, g_onlinePlus);
+    api->drawString(16, 8, MENU_ONLINE_BORDER_COLOR, g_updateWideRail);
+    api->drawString(196, 8, MENU_ONLINE_BORDER_COLOR, g_onlinePlus);
+    api->drawString(10, 16, MENU_ONLINE_BORDER_COLOR, g_onlinePipe);
+    api->drawString(196, 16, MENU_ONLINE_BORDER_COLOR, g_onlinePipe);
+    api->drawString(10, 24, MENU_ONLINE_BORDER_COLOR, g_onlinePlus);
+    api->drawString(16, 24, MENU_ONLINE_BORDER_COLOR, g_updateWideRail);
+    api->drawString(196, 24, MENU_ONLINE_BORDER_COLOR, g_onlinePlus);
+    api->drawString(22, 16, MENU_ONLINE_TITLE_COLOR, g_bigUpdateTitle);
+}
+
+PLUGIN_CODE(onln) static void PLUGIN_onln_DrawBigUpdatePrompt(const MENUOnlineApi *api)
+{
+    api->drawLock();
+    api->drawClear();
+    PLUGIN_onln_DrawBigUpdateFrame(api);
+    api->drawString(20, 44, COLOR_WHITE, g_bigUpdateLine1);
+    api->drawString(20, 57, COLOR_WHITE, g_bigUpdateLine2);
+    api->drawString(20, 82, COLOR_WHITE, g_bigUpdateLine3);
+    api->drawString(20, 95, COLOR_WHITE, g_bigUpdateLine4);
+    api->drawString(20, 128, COLOR_YELLOW, g_bigUpdateQuestion);
+    api->drawString(20, 154, COLOR_GREEN, g_bigUpdateAccept);
+    api->drawString(20, 172, COLOR_GRAY, g_bigUpdateLeave);
+    api->drawFlush();
+    api->drawUnlock();
+}
+
+PLUGIN_CODE(onln) static void PLUGIN_onln_DrawBigUpdateStatus(
+    const MENUOnlineApi *api, const char *message, Result result)
+{
+    api->drawLock();
+    api->drawClear();
+    PLUGIN_onln_DrawBigUpdateFrame(api);
+    api->drawString(20, 52, R_FAILED(result) ? COLOR_RED : COLOR_WHITE, message);
+    if (R_FAILED(result))
+    {
+        PLUGIN_onln_FormatResult(result);
+        api->drawString(20, 78, COLOR_RED, g_onlineResultPrefix);
+        api->drawString(80, 78, COLOR_RED, g_onlineResultHex);
+        api->drawString(20, 112, COLOR_GRAY, g_updatePressBack);
+    }
+    api->drawFlush();
+    api->drawUnlock();
+}
+
+PLUGIN_CODE(onln) static OnlnPack *PLUGIN_onln_FindMenuPack(void)
+{
+    for (u32 i = 0; i < g_packCount; i++)
+    {
+        OnlnPack *pack = &g_packs[i];
+        for (u32 j = 0; j < pack->componentCount; j++)
+            if (pack->components[j].plgid == ONLN_MENU_PLUGIN_ID)
+                return pack;
+    }
+    return NULL;
+}
+
+PLUGIN_CODE(onln) static Result PLUGIN_onln_BootstrapMenuUpdate(const MENUOnlineApi *api)
+{
+    Result result;
+    OnlnPack *menuPack;
+
+    PLUGIN_onln_DrawBigUpdateStatus(api, g_updateRecovering, 0);
+    result = PLUGIN_onln_RecoverInterruptedUpdate(api);
+    if (R_FAILED(result))
+        return result;
+
+    PLUGIN_onln_DrawBigUpdateStatus(api, g_updateFetching, 0);
+    PLUGIN_onln_DeleteIfExists(api, g_updateManifestPath);
+    if (!PLUGIN_onln_BuildSourceUrl(api, g_updateManifestName, g_updateUrl, sizeof(g_updateUrl)))
+        result = ONLN_UPDATE_BAD_FORMAT;
+    else
+        result = api->downloadToFile(g_updateUrl, g_updateManifestPath, ONLN_PACK_MANIFEST_MAX);
+    if (R_FAILED(result))
+        goto finish;
+    result = PLUGIN_onln_ParseManifest(api);
+    if (R_FAILED(result))
+        goto finish;
+    result = PLUGIN_onln_ParsePackManifest(api);
+    if (R_FAILED(result))
+        goto finish;
+
+    menuPack = PLUGIN_onln_FindMenuPack();
+    if (!menuPack)
+    {
+        result = ONLN_PACK_BAD_FORMAT;
+        goto finish;
+    }
+
+    PLUGIN_onln_DrawBigUpdateStatus(api, g_bigUpdateUpdating, 0);
+    result = PLUGIN_onln_BuildPack(api, menuPack, NULL);
+
+finish:
+    PLUGIN_onln_DeleteIfExists(api, g_updateManifestPath);
+    return result;
+}
+
+PLUGIN_CODE(onln) static void PLUGIN_onln_RunBigUpdate(const MENUOnlineApi *api)
+{
+    PLUGIN_onln_DrawBigUpdatePrompt(api);
+    for (;;)
+    {
+        u32 pressed;
+        if (*api->menuShouldExit)
+            return;
+        pressed = api->waitInputWithTimeout(50);
+        if (pressed & KEY_B)
+            return;
+        if (pressed & KEY_A)
+        {
+            Result result = PLUGIN_onln_BootstrapMenuUpdate(api);
+            if (R_FAILED(result))
+            {
+                PLUGIN_onln_DrawBigUpdateStatus(api, g_bigUpdateFailed, result);
+                PLUGIN_onln_WaitBack(api);
+                return;
+            }
+            api->drawLock();
+            api->drawClear();
+            PLUGIN_onln_DrawBigUpdateFrame(api);
+            api->drawString(20, 58, COLOR_YELLOW, g_updateRestart);
+            api->drawString(20, 92, COLOR_GRAY, g_updatePressBack);
+            api->drawFlush();
+            api->drawUnlock();
+            PLUGIN_onln_WaitBack(api);
+            return;
+        }
+    }
+}
+
 PLUGIN_CODE(onln) static Result PLUGIN_onln_ActOnPack(
     const MENUOnlineApi *api, OnlnPack *pack)
 {
     u32 state = PLUGIN_onln_PackState(pack);
     Result result;
+    if (state == ONLN_PACK_STATE_YELLOW)
+        return 0;
     if (state == ONLN_PACK_STATE_GREEN)
     {
         if (!pack->outputComplete)
@@ -4537,8 +4794,11 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_ActOnPack(
             result = PLUGIN_onln_BuildPack(api, pack, target);
             if (R_FAILED(result))
                 return result;
+            if (!api->addSysplugin || !api->addSysplugin(target))
+                return ONLN_UPDATE_BAD_FILE;
             pack->outputExists = true;
             pack->outputComplete = true;
+            pack->pendingReboot = true;
             result = PLUGIN_onln_ScanSelected(api);
             if (R_FAILED(result))
                 return result;
@@ -4598,8 +4858,11 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_ActOnPack(
     result = PLUGIN_onln_BuildPack(api, pack, NULL);
     if (R_FAILED(result))
         return result;
+    if (!api->addSysplugin || !api->addSysplugin(pack->output))
+        return ONLN_UPDATE_BAD_FILE;
     pack->outputExists = true;
     pack->outputComplete = true;
+    pack->pendingReboot = true;
     result = PLUGIN_onln_ScanSelected(api);
     if (R_FAILED(result))
         return result;
@@ -4707,6 +4970,13 @@ PLUGIN_CODE(onln) static void PLUGIN_onln_RunPackList(const MENUOnlineApi *api)
                 Result result;
                 if (!pack)
                     continue;
+                if (PLUGIN_onln_PackState(pack) == ONLN_PACK_STATE_YELLOW)
+                {
+                    PLUGIN_onln_DrawPackReboot(api, pack);
+                    PLUGIN_onln_WaitBack(api);
+                    redraw = true;
+                    continue;
+                }
                 if (!PLUGIN_onln_RunPackDetails(api, pack))
                 {
                     redraw = true;
@@ -4778,7 +5048,7 @@ finish:
 PLUGIN_MAIN(onln) void PLUGIN_onln_Main(const MENUOnlineApi *api)
 {
     if (!api ||
-        api->version != MENU_ONLINE_API_VERSION ||
+        api->version < MENU_ONLINE_API_MIN_VERSION ||
         !api->drawLock ||
         !api->drawUnlock ||
         !api->drawClear ||
@@ -4799,6 +5069,12 @@ PLUGIN_MAIN(onln) void PLUGIN_onln_Main(const MENUOnlineApi *api)
         !api->sourceUrlPrefix ||
         !*api->sourceUrlPrefix)
     {
+        return;
+    }
+
+    if (!PLUGIN_onln_HasSyspluginManageApi(api))
+    {
+        PLUGIN_onln_RunBigUpdate(api);
         return;
     }
 

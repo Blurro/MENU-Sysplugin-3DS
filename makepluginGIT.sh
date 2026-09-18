@@ -58,6 +58,7 @@ ROSALINA_PLUGIN_CONFIG=(
 )
 
 LOADER_PLUGIN_CONFIG=(
+    "MENU|menu_l|"
 )
 
 # Optional metadata is appended to one single-entry .3nx after its normal 16-byte body padding.
@@ -67,7 +68,8 @@ LOADER_PLUGIN_CONFIG=(
 # Files are concatenated in listed order with no gaps, then the combined metadata is padded to 16 bytes.
 # Re-running replaces that plugin's previous metadata. Already-stacked .3nx targets are warned and dropped.
 METADATA_CONFIG=(
-    "menu_r|version103.bin|httpslib.3on.lz"
+    "menu_r|version104.bin|httpslib.3on.lz"
+    "menu_l|version104.bin"
 )
 
 # GitHub update payloads must be standalone single-entry files.

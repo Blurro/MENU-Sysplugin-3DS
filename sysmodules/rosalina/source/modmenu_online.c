@@ -773,7 +773,8 @@ done:
 }
 
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_EnsureHttpslib(
-    const PluginMenuFileContext *selfFile
+    const PluginMenuFileContext *selfFile,
+    bool forceRefresh
 )
 {
     u32 selfVersion[2];
@@ -811,7 +812,8 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_EnsureHttpslib(
         return false;
     }
 
-    if (PLUGIN_MENU_GetHttpsVersion(selfFile->archive, &installedVersion) &&
+    if (!forceRefresh &&
+        PLUGIN_MENU_GetHttpsVersion(selfFile->archive, &installedVersion) &&
         installedVersion == compressed.version)
     {
         return true;
@@ -843,11 +845,30 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_LoadHttpsLibrary(MENUTransientImage *i
 {
     MENUHttpsApi api;
     if(!PLUGIN_MENU_LoadTransient(g_MENUHttpsPath,MENU_HTTPS_ID,g_MENUOnlineStageOpenHttps,image))return false;
-    g_MENUHttpsHostApi.version=MENU_HTTPS_HOST_API_VERSION;g_MENUHttpsHostApi.hostTable=pluginTable_MENU;g_MENUHttpsHostApi.protectMemory=PLUGIN_MENU_OnlineProtect;
+    g_MENUHttpsHostApi.version=MENU_HTTPS_HOST_API_VERSION;g_MENUHttpsHostApi.hostTable=pluginTable_MENU;g_MENUHttpsHostApi.protectMemory=PLUGIN_MENU_OnlineProtect;g_MENUHttpsHostApi.addSysplugin=PLUGIN_MENU_AddSysplugin;g_MENUHttpsHostApi.disableSysplugin=PLUGIN_MENU_DisableSysplugin;g_MENUHttpsHostApi.enableSysplugin=PLUGIN_MENU_EnableSysplugin;g_MENUHttpsHostApi.deleteSysplugin=PLUGIN_MENU_DeleteSysplugin;
     api.version=0;api.downloadToFile=NULL;api.downloadToMemory=NULL;api.openOnlineMenu=NULL;api.openOnlineSource=NULL;
     bool ok=((bool(*)(const MENUHttpsHostApi*,MENUHttpsApi*))image->base)(&g_MENUHttpsHostApi,&api);
     if(!ok||api.version!=MENU_HTTPS_API_VERSION||!api.downloadToFile||!api.downloadToMemory||!api.openOnlineMenu||!api.openOnlineSource){PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageInitHttps,(Result)0xD8A0A069u);PLUGIN_MENU_OnlineFree(image);return false;}
     g_MENUHttpsOpenOnline=api.openOnlineMenu;g_MENUHttpsOpenOnlineSource=api.openOnlineSource;return true;
+}
+
+PLUGIN_CODE(MENU) static bool PLUGIN_MENU_LoadHttpsLibraryWithRefresh(MENUTransientImage *image)
+{
+    PluginMenuFileContext selfFile;
+    bool refreshed;
+
+    if (PLUGIN_MENU_LoadHttpsLibrary(image))
+        return true;
+
+    if (!PLUGIN_MENU_OpenPluginFile(MENU_PLUGIN_ID, &selfFile))
+        return false;
+    refreshed = PLUGIN_MENU_EnsureHttpslib(&selfFile, true);
+    PLUGIN_MENU_ClosePluginFile(&selfFile);
+    if (!refreshed)
+        return false;
+
+    g_MENUHttpsReady = true;
+    return PLUGIN_MENU_LoadHttpsLibrary(image);
 }
 
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_UnloadHttpsLibrary(MENUTransientImage *image)
@@ -1429,7 +1450,7 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_OpenOnlineMenu(void)
         PluginMenuFileContext selfFile;
         if (PLUGIN_MENU_OpenPluginFile(MENU_PLUGIN_ID, &selfFile))
         {
-            g_MENUHttpsReady = PLUGIN_MENU_EnsureHttpslib(&selfFile);
+            g_MENUHttpsReady = PLUGIN_MENU_EnsureHttpslib(&selfFile, false);
             PLUGIN_MENU_ClosePluginFile(&selfFile);
         }
         else
@@ -1444,7 +1465,7 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_OpenOnlineMenu(void)
         }
     }
 
-    if (!PLUGIN_MENU_LoadHttpsLibrary(&image))
+    if (!PLUGIN_MENU_LoadHttpsLibraryWithRefresh(&image))
     {
         PLUGIN_MENU_DrawOnlineError();
         return;
@@ -1465,7 +1486,7 @@ PLUGIN_CODE(MENU) void PLUGIN_MENU_OpenOnlineSource(const char *url)
         PluginMenuFileContext selfFile;
         if (PLUGIN_MENU_OpenPluginFile(MENU_PLUGIN_ID, &selfFile))
         {
-            g_MENUHttpsReady = PLUGIN_MENU_EnsureHttpslib(&selfFile);
+            g_MENUHttpsReady = PLUGIN_MENU_EnsureHttpslib(&selfFile, false);
             PLUGIN_MENU_ClosePluginFile(&selfFile);
         }
         else
@@ -1480,7 +1501,7 @@ PLUGIN_CODE(MENU) void PLUGIN_MENU_OpenOnlineSource(const char *url)
         }
     }
 
-    if (!PLUGIN_MENU_LoadHttpsLibrary(&image))
+    if (!PLUGIN_MENU_LoadHttpsLibraryWithRefresh(&image))
     {
         PLUGIN_MENU_DrawOnlineError();
         return;

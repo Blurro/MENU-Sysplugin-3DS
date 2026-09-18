@@ -86,7 +86,7 @@ typedef struct __attribute__((packed))
 #define MENU_TRANSIENT_MAGIC 0x26584E33u
 #define MENU_HTTPS_ID 0x73707468u
 #define MENU_TRANSIENT_HEADER_SIZE 0x2Cu
-#define MENU_HTTPS_HOST_API_VERSION 4u
+#define MENU_HTTPS_HOST_API_VERSION 5u
 #define MENU_HTTPS_API_VERSION 4u
 #define MENU_TRANSIENT_LOW 0x10000000u
 #define MENU_TRANSIENT_HIGH 0x14000000u
@@ -139,6 +139,10 @@ typedef struct
     u32 version;
     void **hostTable;
     Result (*protectMemory)(u32, u32, MemPerm);
+    bool (*addSysplugin)(const char *name);
+    bool (*disableSysplugin)(const char *name);
+    bool (*enableSysplugin)(const char *name);
+    bool (*deleteSysplugin)(const char *name);
 } MENUHttpsHostApi;
 
 typedef struct
@@ -245,6 +249,9 @@ typedef struct
 #define MENU_FETCH_TITLE_MAX 46u
 
 extern bool PLUGIN_MENU_InstallDrawStringHook(void);
+extern bool PLUGIN_MENU_InstallBridgeHook(void);
+extern bool PLUGIN_MENU_RemoveBridgeHook(void);
+extern void PluginLoader__HandleCommands(void *ctx);
 
 PLUGIN_DATA(MENU) void *pluginTable_MENU[] = {
     (void*)svcSleepThread,
@@ -289,6 +296,7 @@ PLUGIN_DATA(MENU) void *pluginTable_MENU[] = {
     (void*)socClose,
     (void*)FSUSER_RenameFile,
     (void*)FSUSER_CreateDirectory,
+    (void*)PluginLoader__HandleCommands,
 };
 
 #define MENU_HOST__svcSleepThread            ((void(*)(s64))pluginTable_MENU[0])
@@ -414,6 +422,7 @@ PLUGIN_BSS(MENU) u64 PLUGIN_MENU_expectedEnv;
 PLUGIN_BSS(MENU) static volatile s32 g_MENURegistryLock;
 PLUGIN_BSS(MENU) static volatile s32 g_MENUDataLock;
 PLUGIN_BSS(MENU) static volatile s32 g_MENUFetchLock;
+PLUGIN_BSS(MENU) static volatile s32 g_MENUSyspluginStateLock;
 PLUGIN_BSS(MENU) static PluginMenuRegistration *g_MENUFirstItem;
 PLUGIN_BSS(MENU) static PluginMenuRegistration *g_MENULastItem;
 PLUGIN_BSS(MENU) static u32 g_MENUItemCount;
@@ -449,6 +458,10 @@ PLUGIN_BSS(MENU) static bool g_MENUManageCapturingBoot;
 PLUGIN_CODE(MENU) bool PLUGIN_MENU_FindFreeRange(u32 size, u32 *outBase);
 PLUGIN_CODE(MENU) bool PLUGIN_MENU_TempAlloc(u32 size, u32 *outBase);
 PLUGIN_CODE(MENU) void PLUGIN_MENU_TempFree(u32 base, u32 size);
+PLUGIN_CODE(MENU) bool PLUGIN_MENU_AddSysplugin(const char *name);
+PLUGIN_CODE(MENU) bool PLUGIN_MENU_DisableSysplugin(const char *name);
+PLUGIN_CODE(MENU) bool PLUGIN_MENU_EnableSysplugin(const char *name);
+PLUGIN_CODE(MENU) bool PLUGIN_MENU_DeleteSysplugin(const char *name);
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ScanAllocScratch(void);
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_ScanFreeScratch(void);
 
@@ -1072,7 +1085,7 @@ PLUGIN_MAIN(MENU) bool PLUGIN_MENU_Main(void)
 
     PLUGIN_MENU_LoadSeenState(selfOpen ? &selfFile : NULL);
     if (selfOpen)
-        g_MENUHttpsReady = PLUGIN_MENU_EnsureHttpslib(&selfFile);
+        g_MENUHttpsReady = PLUGIN_MENU_EnsureHttpslib(&selfFile, false);
     else
     {
         g_MENUHttpsReady = false;
@@ -1088,12 +1101,24 @@ PLUGIN_MAIN(MENU) bool PLUGIN_MENU_Main(void)
         return false;
     }
 
-    // install last so failed setup leaves no callback behind
-    if (!PLUGIN_MENU_InstallDrawStringHook())
+    if (!PLUGIN_MENU_InstallBridgeHook())
     {
         PLUGIN_MENU_RemoveRootItem();
         PLUGIN_MENU_ResetRegistry();
         return false;
+    }
+
+    // draw hook stays last because it has no unload-time rollback path.
+    if (!PLUGIN_MENU_InstallDrawStringHook())
+    {
+        if (PLUGIN_MENU_RemoveBridgeHook())
+        {
+            PLUGIN_MENU_RemoveRootItem();
+            PLUGIN_MENU_ResetRegistry();
+            return false;
+        }
+        // Failed bridge rollback leaves a host branch into this image, so stay resident.
+        return true;
     }
 
     return true;

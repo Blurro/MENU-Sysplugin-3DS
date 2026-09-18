@@ -7,7 +7,7 @@
 #define PLUGIN_DATA(id)   __attribute__((section(".plugindata_" #id), used))
 #define PLUGIN_BSS(id)    __attribute__((section(".pluginbss_" #id), used))
 
-#define MENU_HTTPS_HOST_API_VERSION 4u
+#define MENU_HTTPS_HOST_API_VERSION 5u
 #define MENU_HTTPS_API_VERSION 4u
 #define HTTPS_DOWNLOAD_CHUNK_SIZE 0x1000u
 #define HTTPS_LOW 0x10000000u
@@ -25,6 +25,10 @@ typedef struct
     u32 version;
     void **hostTable;
     Result (*protectMemory)(u32, u32, MemPerm);
+    bool (*addSysplugin)(const char *name);
+    bool (*disableSysplugin)(const char *name);
+    bool (*enableSysplugin)(const char *name);
+    bool (*deleteSysplugin)(const char *name);
 } MENUHttpsHostApi;
 
 typedef struct
@@ -36,7 +40,7 @@ typedef struct
     void (*openOnlineSource)(const char *url);
 } MENUHttpsApi;
 
-#define HTPS_ONLINE_API_VERSION 5u
+#define HTPS_ONLINE_API_VERSION 6u
 #define HTPS_TRANSIENT_MAGIC 0x26584E33u
 #define HTPS_ONLINE_ID 0x6E6C6E6Fu
 #define HTPS_TRANSIENT_HEADER_SIZE 0x2Cu
@@ -83,6 +87,10 @@ typedef struct
     Result (*fileExists)(const char *, bool *);
     Result (*enumerateDirectory)(const char *, HtpsOnlineDirVisitor, void *, u32 *);
     const char *sourceUrlPrefix;
+    bool (*addSysplugin)(const char *name);
+    bool (*disableSysplugin)(const char *name);
+    bool (*enableSysplugin)(const char *name);
+    bool (*deleteSysplugin)(const char *name);
 } MENUOnlineApi;
 
 typedef struct
@@ -1572,14 +1580,15 @@ PLUGIN_CODE(htps) static Result PLUGIN_htps_WriteFile(const char*p,u32 off,const
 PLUGIN_CODE(htps) static Result PLUGIN_htps_SetFileSize(const char*p,u32 sz){FS_Archive a=0;Handle f=0;Result r;if(!PLUGIN_htps_ValidFsPath(p))return HTPS_FS_BAD_ARG;r=PLUGIN_htps_OpenSd(&a);if(R_FAILED(r))return r;r=HTTPS_HOST__FSUSER_OpenFile(&f,a,HTTPS_HOST__fsMakePath(PATH_ASCII,p),FS_OPEN_WRITE|FS_OPEN_CREATE,0);if(R_SUCCEEDED(r)){r=HTTPS_HOST__FSFILE_SetSize(f,sz);HTTPS_HOST__FSFILE_Close(f);}HTTPS_HOST__FSUSER_CloseArchive(a);return r;}
 PLUGIN_CODE(htps) static Result PLUGIN_htps_DeleteFile(const char*p){FS_Archive a=0;Result r;if(!PLUGIN_htps_ValidFsPath(p))return HTPS_FS_BAD_ARG;r=PLUGIN_htps_OpenSd(&a);if(R_FAILED(r))return r;r=HTTPS_HOST__FSUSER_DeleteFile(a,HTTPS_HOST__fsMakePath(PATH_ASCII,p));HTTPS_HOST__FSUSER_CloseArchive(a);return r;}
 PLUGIN_CODE(htps) static Result PLUGIN_htps_RenameFile(const char*o,const char*n){FS_Archive a=0;Result r;if(!PLUGIN_htps_ValidFsPath(o)||!PLUGIN_htps_ValidFsPath(n))return HTPS_FS_BAD_ARG;r=PLUGIN_htps_OpenSd(&a);if(R_FAILED(r))return r;r=HTTPS_HOST__FSUSER_RenameFile(a,HTTPS_HOST__fsMakePath(PATH_ASCII,o),a,HTTPS_HOST__fsMakePath(PATH_ASCII,n));HTTPS_HOST__FSUSER_CloseArchive(a);return r;}
-PLUGIN_CODE(htps) static Result PLUGIN_htps_CreateDirectory(const char*p){FS_Archive a=0;Handle d=0;Result r;if(!PLUGIN_htps_ValidFsPath(p))return HTPS_FS_BAD_ARG;r=PLUGIN_htps_OpenSd(&a);if(R_FAILED(r))return r;r=HTTPS_HOST__FSUSER_CreateDirectory(a,HTTPS_HOST__fsMakePath(PATH_ASCII,p),0);if(R_FAILED(r)){Result openResult=HTTPS_HOST__FSUSER_OpenDirectory(&d,a,HTTPS_HOST__fsMakePath(PATH_ASCII,p));if(R_SUCCEEDED(openResult)){HTTPS_HOST__FSDIR_Close(d);r=0;}}{Result c=HTTPS_HOST__FSUSER_CloseArchive(a);if(R_SUCCEEDED(r)&&R_FAILED(c))r=c;}return r;}
+PLUGIN_CODE(htps) static Result PLUGIN_htps_CreateOneDirectory(FS_Archive archive,const char*p){Handle d=0;Result r=HTTPS_HOST__FSUSER_CreateDirectory(archive,HTTPS_HOST__fsMakePath(PATH_ASCII,p),0);if(R_FAILED(r)){Result openResult=HTTPS_HOST__FSUSER_OpenDirectory(&d,archive,HTTPS_HOST__fsMakePath(PATH_ASCII,p));if(R_SUCCEEDED(openResult)){HTTPS_HOST__FSDIR_Close(d);r=0;}}return r;}
+PLUGIN_CODE(htps) static Result PLUGIN_htps_CreateDirectory(const char*p){FS_Archive a=0;Result r;char path[HTPS_FS_MAX_PATH+1u];u32 length=0;if(!PLUGIN_htps_ValidFsPath(p))return HTPS_FS_BAD_ARG;while(p[length]){path[length]=p[length];length++;}path[length]=0;r=PLUGIN_htps_OpenSd(&a);if(R_FAILED(r))return r;for(u32 i=1u;i<=length;i++){if(path[i]!='/'&&path[i]!=0)continue;char saved=path[i];path[i]=0;if(path[1])r=PLUGIN_htps_CreateOneDirectory(a,path);path[i]=saved;if(R_FAILED(r))break;}if(a){Result c=HTTPS_HOST__FSUSER_CloseArchive(a);if(R_SUCCEEDED(r)&&R_FAILED(c))r=c;}return r;}
 PLUGIN_CODE(htps) static Result PLUGIN_htps_FileExists(const char*p,bool*exists){FS_Archive a=0;Handle f=0;Result r;if(!exists||!PLUGIN_htps_ValidFsPath(p))return HTPS_FS_BAD_ARG;*exists=false;r=PLUGIN_htps_OpenSd(&a);if(R_FAILED(r))return r;r=HTTPS_HOST__FSUSER_OpenFile(&f,a,HTTPS_HOST__fsMakePath(PATH_ASCII,p),FS_OPEN_READ,0);if(R_SUCCEEDED(r)){*exists=true;HTTPS_HOST__FSFILE_Close(f);r=0;}else if(R_DESCRIPTION(r)==RD_NOT_FOUND)r=0;HTTPS_HOST__FSUSER_CloseArchive(a);return r;}
 PLUGIN_CODE(htps) static bool PLUGIN_htps_AppendUtf8(char*out,u32 cap,u32*len,u32 cp){u8 b[4];u32 n;if(cp<=0x7F){b[0]=(u8)cp;n=1;}else if(cp<=0x7FF){b[0]=0xC0|(cp>>6);b[1]=0x80|(cp&0x3F);n=2;}else if(cp<=0xFFFF){b[0]=0xE0|(cp>>12);b[1]=0x80|((cp>>6)&0x3F);b[2]=0x80|(cp&0x3F);n=3;}else{b[0]=0xF0|(cp>>18);b[1]=0x80|((cp>>12)&0x3F);b[2]=0x80|((cp>>6)&0x3F);b[3]=0x80|(cp&0x3F);n=4;}if(!out||!len||!cap||*len+n>=cap)return false;for(u32 i=0;i<n;i++)out[(*len)++]=(char)b[i];out[*len]=0;return true;}
 PLUGIN_CODE(htps) static bool PLUGIN_htps_DirNameToUtf8(char*out,u32 cap,const u16*in){u32 len=0;if(!out||!cap||!in)return false;out[0]=0;for(u32 i=0;i<0x106u;i++){u32 cp=in[i];if(!cp)return true;if(cp>=0xD800u&&cp<=0xDBFFu){u32 low=i+1u<0x106u?in[i+1u]:0;if(low<0xDC00u||low>0xDFFFu)cp=0xFFFDu;else{cp=0x10000u+((cp-0xD800u)<<10)+(low-0xDC00u);i++;}}else if(cp>=0xDC00u&&cp<=0xDFFFu)cp=0xFFFDu;if(!PLUGIN_htps_AppendUtf8(out,cap,&len,cp))return false;}return false;}
 PLUGIN_CODE(htps) static Result PLUGIN_htps_EnumerateDirectory(const char*p,HtpsOnlineDirVisitor visitor,void*ctx,u32*visited){FS_Archive a=0;Handle d=0;FS_DirectoryEntry raw;HtpsOnlineDirEntry e;Result r;bool open=false;if(!visitor||!PLUGIN_htps_ValidFsPath(p))return HTPS_FS_BAD_ARG;if(visited)*visited=0;r=PLUGIN_htps_OpenSd(&a);if(R_FAILED(r))return r;r=HTTPS_HOST__FSUSER_OpenDirectory(&d,a,HTTPS_HOST__fsMakePath(PATH_ASCII,p));if(R_FAILED(r))goto done;open=true;for(;;){u32 count=0;bool stop=false;r=HTTPS_HOST__FSDIR_Read(d,&count,1,&raw);if(R_FAILED(r)||!count)break;e.fileSize=raw.fileSize;e.attributes=raw.attributes;e.flags=0;if(PLUGIN_htps_DirNameToUtf8(e.name,sizeof(e.name),raw.name))e.flags|=HTPS_DIR_NAME_COMPLETE;if(visited)(*visited)++;r=visitor(&e,ctx,&stop);if(R_FAILED(r)||stop)break;}done:if(open){Result c=HTTPS_HOST__FSDIR_Close(d);if(R_SUCCEEDED(r)&&R_FAILED(c))r=c;}if(a){Result c=HTTPS_HOST__FSUSER_CloseArchive(a);if(R_SUCCEEDED(r)&&R_FAILED(c))r=c;}return r;}
 
 PLUGIN_CODE(htps) static bool PLUGIN_htps_RunOnlineSource(void)
-{HtpsTransientImage image;PLUGIN_htps_DrawOnlineStatus(g_htpsWaiting,false);Result r=PLUGIN_htps_OnlineDownloadToFile(g_htpsOnlineUrl,g_htpsOnlinePath,HTPS_TRANSIENT_MAX_FILE_SIZE);if(R_FAILED(r)){PLUGIN_htps_SetOnlineFailure(g_htpsStageDownload,r);goto fail;}if(!PLUGIN_htps_LoadOnlineTransient(&image))goto fail_delete;MENUOnlineApi api;api.version=HTPS_ONLINE_API_VERSION;api.drawLock=HTTPS_HOST__Draw_Lock;api.drawUnlock=HTTPS_HOST__Draw_Unlock;api.drawClear=HTTPS_HOST__Draw_Clear;api.drawString=HTTPS_HOST__Draw_String;api.drawFlush=HTTPS_HOST__Draw_Flush;api.waitInputWithTimeout=HTTPS_HOST__waitInputWithTimeout;api.menuShouldExit=HTTPS_HOST__menuShouldExit;api.downloadToFile=PLUGIN_htps_OnlineDownloadToFile;api.downloadToMemory=PLUGIN_htps_OnlineDownloadToMemory;api.getFileSize=PLUGIN_htps_GetFileSize;api.readFile=PLUGIN_htps_ReadFile;api.writeFile=PLUGIN_htps_WriteFile;api.setFileSize=PLUGIN_htps_SetFileSize;api.deleteFile=PLUGIN_htps_DeleteFile;api.renameFile=PLUGIN_htps_RenameFile;api.fileExists=PLUGIN_htps_FileExists;api.enumerateDirectory=PLUGIN_htps_EnumerateDirectory;api.sourceUrlPrefix=g_htpsFetchBase;((void(*)(const MENUOnlineApi*))image.base)(&api);PLUGIN_htps_FreeOnlineTransient(&image);
+{HtpsTransientImage image;PLUGIN_htps_DrawOnlineStatus(g_htpsWaiting,false);Result r=PLUGIN_htps_OnlineDownloadToFile(g_htpsOnlineUrl,g_htpsOnlinePath,HTPS_TRANSIENT_MAX_FILE_SIZE);if(R_FAILED(r)){PLUGIN_htps_SetOnlineFailure(g_htpsStageDownload,r);goto fail;}if(!PLUGIN_htps_LoadOnlineTransient(&image))goto fail_delete;MENUOnlineApi api;api.version=HTPS_ONLINE_API_VERSION;api.drawLock=HTTPS_HOST__Draw_Lock;api.drawUnlock=HTTPS_HOST__Draw_Unlock;api.drawClear=HTTPS_HOST__Draw_Clear;api.drawString=HTTPS_HOST__Draw_String;api.drawFlush=HTTPS_HOST__Draw_Flush;api.waitInputWithTimeout=HTTPS_HOST__waitInputWithTimeout;api.menuShouldExit=HTTPS_HOST__menuShouldExit;api.downloadToFile=PLUGIN_htps_OnlineDownloadToFile;api.downloadToMemory=PLUGIN_htps_OnlineDownloadToMemory;api.getFileSize=PLUGIN_htps_GetFileSize;api.readFile=PLUGIN_htps_ReadFile;api.writeFile=PLUGIN_htps_WriteFile;api.setFileSize=PLUGIN_htps_SetFileSize;api.deleteFile=PLUGIN_htps_DeleteFile;api.renameFile=PLUGIN_htps_RenameFile;api.fileExists=PLUGIN_htps_FileExists;api.enumerateDirectory=PLUGIN_htps_EnumerateDirectory;api.sourceUrlPrefix=g_htpsFetchBase;api.addSysplugin=g_httpsHost->addSysplugin;api.disableSysplugin=g_httpsHost->disableSysplugin;api.enableSysplugin=g_httpsHost->enableSysplugin;api.deleteSysplugin=g_httpsHost->deleteSysplugin;((void(*)(const MENUOnlineApi*))image.base)(&api);PLUGIN_htps_FreeOnlineTransient(&image);
 fail_delete:{FS_Archive a=0;if(R_SUCCEEDED(HTTPS_HOST__FSUSER_OpenArchive(&a,ARCHIVE_SDMC,HTTPS_HOST__fsMakePath(PATH_EMPTY,g_httpsOnlineEmptyPath)))){(void)HTTPS_HOST__FSUSER_DeleteFile(a,HTTPS_HOST__fsMakePath(PATH_ASCII,g_htpsOnlinePath));HTTPS_HOST__FSUSER_CloseArchive(a);}}return true;
 fail:PLUGIN_htps_DrawOnlineStatus(g_htpsOnlineError,true);return false;}
 PLUGIN_CODE(htps) static void PLUGIN_htps_OpenOnlineSource(const char *url)

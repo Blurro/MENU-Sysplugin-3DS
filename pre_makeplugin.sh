@@ -13,7 +13,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$SCRIPT_DIR"
 
 # HTTPSLIB transient version. Change this one value when bumping httpslib.
-HTTPSLIB_VERSION=104
+HTTPSLIB_VERSION=106
 
 MAIN_BUILDER="${SCRIPT_DIR}/makeplugin.sh"
 TRANSIENT_TOOL="${SCRIPT_DIR}/sysplugin/make_transient_3on.py"
