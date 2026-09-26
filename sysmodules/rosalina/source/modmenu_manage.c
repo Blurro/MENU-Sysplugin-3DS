@@ -926,6 +926,18 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_ManageBuildSelection(FS_Archive archiv
                 winner->fileOffset = offset;
                 (*count)++;
                 item->selected = 1;
+
+                if (g_MENUManageCapturingBoot &&
+                    header.magic == MENU_PLUGIN_MAGIC &&
+                    header.pluginId == MENU_PLUGIN_ID)
+                {
+                    g_MENUBootSelf.found = true;
+                    g_MENUBootSelf.entryOffset = offset;
+                    g_MENUBootSelf.metadataOffset = metadataOffset;
+                    g_MENUBootSelf.metadataSize = header.metadataSize;
+                    g_MENUBootSelf.expectedEnvLo = header.expectedEnvLo;
+                    g_MENUBootSelf.expectedEnvHi = header.expectedEnvHi;
+                }
             }
             offset = nextOffset;
         }
@@ -1065,6 +1077,13 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageSaveBootSnapshot(void)
 
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_ManageCaptureBootSnapshot(void)
 {
+    g_MENUBootSelf.found = false;
+    g_MENUBootSelf.entryOffset = 0;
+    g_MENUBootSelf.metadataOffset = 0;
+    g_MENUBootSelf.metadataSize = 0;
+    g_MENUBootSelf.expectedEnvLo = 0;
+    g_MENUBootSelf.expectedEnvHi = 0;
+
     if (!PLUGIN_MENU_ManageAllocScratch())
         return;
 

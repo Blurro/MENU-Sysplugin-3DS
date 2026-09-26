@@ -77,8 +77,8 @@ LOADER_PLUGIN_CONFIG=(
 # Files are concatenated in listed order with no gaps, then the combined metadata is padded to 16 bytes.
 # Re-running replaces that plugin's previous metadata. Already-stacked .3nx targets are warned and dropped.
 METADATA_CONFIG=(
-    "ModMenuRosalina|version104.bin|httpslib.3on.lz"
-    "ModMenuLoader|version104.bin"
+    "ModMenuRosalina|version105.bin|httpslib.3on.lz"
+    "ModMenuLoader|version105.bin"
 )
 
 # Tip: 3nx file data can be stacked, to make one .3nx file hold multiple plugins. Place generated .3nx files at SD:/luma/plugins/

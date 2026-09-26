@@ -186,7 +186,7 @@ $(OFILES_SRC)	: $(HFILES_BIN) $(SEMANTIC_MARKER_PLUGIN)
 
 httpslib_tls_bundle.o: httpslib_tls_force
 	@echo httpslib tls bundle
-	@CC="$(CC)" $(TOPDIR)/httpslib_tls/build.sh $@
+	@CC="$(CC)" sh $(TOPDIR)/httpslib_tls/build.sh $@
 
 httpslib_tls_force:
 

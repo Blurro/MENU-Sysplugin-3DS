@@ -200,6 +200,16 @@ typedef struct
 
 typedef struct
 {
+    bool found;
+    u32 entryOffset;
+    u32 metadataOffset;
+    u32 metadataSize;
+    u32 expectedEnvLo;
+    u32 expectedEnvHi;
+} PluginMenuBootSelf;
+
+typedef struct
+{
     u32 componentId;
     u32 providerId;
 } PluginMenuManageMissing;
@@ -454,6 +464,7 @@ PLUGIN_BSS(MENU) static u32 g_MENUManageActiveCount;
 PLUGIN_BSS(MENU) static u32 g_MENUManageNameUsed;
 PLUGIN_BSS(MENU) static u32 g_MENUManageChangeSize;
 PLUGIN_BSS(MENU) static bool g_MENUManageCapturingBoot;
+PLUGIN_BSS(MENU) static PluginMenuBootSelf g_MENUBootSelf;
 
 PLUGIN_CODE(MENU) bool PLUGIN_MENU_FindFreeRange(u32 size, u32 *outBase);
 PLUGIN_CODE(MENU) bool PLUGIN_MENU_TempAlloc(u32 size, u32 *outBase);
@@ -1080,20 +1091,8 @@ PLUGIN_MAIN(MENU) bool PLUGIN_MENU_Main(void)
         return false;
     }
 
-    PluginMenuFileContext selfFile;
-    bool selfOpen = PLUGIN_MENU_OpenPluginFile(MENU_PLUGIN_ID, &selfFile);
-
-    PLUGIN_MENU_LoadSeenState(selfOpen ? &selfFile : NULL);
-    if (selfOpen)
-        g_MENUHttpsReady = PLUGIN_MENU_EnsureHttpslib(&selfFile, false);
-    else
-    {
-        g_MENUHttpsReady = false;
-        PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageOpenFile, (Result)0xD8A0A060u);
-    }
-
-    if (selfOpen)
-        PLUGIN_MENU_ClosePluginFile(&selfFile);
+    PLUGIN_MENU_LoadSeenState();
+    g_MENUHttpsReady = false;
 
     if (!PLUGIN_MENU_InsertRootItem())
     {

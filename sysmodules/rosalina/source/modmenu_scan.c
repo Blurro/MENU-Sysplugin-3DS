@@ -345,41 +345,20 @@ PLUGIN_CODE(MENU) void PLUGIN_MENU_ClosePluginFile(PluginMenuFileContext *contex
     context->metadataSize = 0;
 }
 
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_LoadSeenState(
-    const PluginMenuFileContext *selfFile
-)
+PLUGIN_CODE(MENU) static void PLUGIN_MENU_LoadSeenState(void)
 {
-    bool foundEnvironment = false;
-
     g_MENUUnread = true;
     g_MENUHasExpectedEnv = false;
     PLUGIN_MENU_expectedEnv = 0;
 
-    if (selfFile && selfFile->file)
+    if (g_MENUBootSelf.found &&
+        (g_MENUBootSelf.expectedEnvLo || g_MENUBootSelf.expectedEnvHi))
     {
-        PluginMenu3nxHeader header;
-        u32 metadataOffset;
-        u32 nextOffset;
+        u32 expectedEnvLo = g_MENUBootSelf.expectedEnvLo & ~1u;
+        PLUGIN_MENU_expectedEnv =
+            ((u64)g_MENUBootSelf.expectedEnvHi << 32) | expectedEnvLo;
+        g_MENUHasExpectedEnv = true;
 
-        if (PLUGIN_MENU_ReadHeader(
-                selfFile->file,
-                selfFile->entryOffset,
-                &header,
-                &metadataOffset,
-                &nextOffset) &&
-            header.magic == MENU_PLUGIN_MAGIC &&
-            header.pluginId == MENU_PLUGIN_ID &&
-            (header.expectedEnvLo || header.expectedEnvHi))
-        {
-            u32 expectedEnvLo = header.expectedEnvLo & ~1u;
-            PLUGIN_MENU_expectedEnv = ((u64)header.expectedEnvHi << 32) | expectedEnvLo;
-            g_MENUHasExpectedEnv = true;
-            foundEnvironment = true;
-        }
-    }
-
-    if (foundEnvironment)
-    {
         PluginMenuSeenState state;
         if (PLUGIN_MENU_LoadData(MENU_PLUGIN_ID, &state, sizeof(state)) &&
             state.expectedEnvLo == (u32)PLUGIN_MENU_expectedEnv &&

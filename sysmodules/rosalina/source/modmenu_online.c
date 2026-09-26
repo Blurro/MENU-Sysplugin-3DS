@@ -589,6 +589,115 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_CompressedGetByte(
     return true;
 }
 
+PLUGIN_CODE(MENU) Result PLUGIN_MENU_ExtractRawFile(
+    const PluginMenuFileContext *source,
+    u32 sourceOffset,
+    u32 sourceSize,
+    const char *outputPath
+)
+{
+    u32 scratchBase = 0;
+    u8 *scratch = NULL;
+    Handle outputFile = 0;
+    u32 sourceEnd;
+    u64 sourceFileSize = 0;
+    u32 copied = 0;
+    Result result = 0;
+
+    if (!source || !source->file || !source->archive || !outputPath || !outputPath[0] ||
+        !PLUGIN_MENU_Add32(sourceOffset, sourceSize, &sourceEnd) ||
+        R_FAILED(MENU_HOST__FSFILE_GetSize(source->file, &sourceFileSize)) ||
+        sourceEnd > sourceFileSize)
+    {
+        return (Result)0xD8A0A06Au;
+    }
+
+    if (sourceSize && !PLUGIN_MENU_TempAlloc(0x10000u, &scratchBase))
+        return (Result)0xD8A0A06Bu;
+    scratch = (u8 *)scratchBase;
+
+    // don't edit sources while an extract is using them
+    PLUGIN_MENU_LockFetch();
+
+    (void)MENU_HOST__FSUSER_DeleteFile(
+        source->archive,
+        MENU_HOST__fsMakePath(PATH_ASCII, outputPath)
+    );
+
+    result = MENU_HOST__FSUSER_OpenFile(
+        &outputFile,
+        source->archive,
+        MENU_HOST__fsMakePath(PATH_ASCII, outputPath),
+        FS_OPEN_WRITE | FS_OPEN_CREATE,
+        0
+    );
+    if (R_FAILED(result))
+        goto done;
+
+    result = MENU_HOST__FSFILE_SetSize(outputFile, sourceSize);
+    if (R_FAILED(result))
+        goto done;
+
+    while (copied < sourceSize)
+    {
+        u32 chunk = sourceSize - copied;
+        u32 read = 0;
+        u32 written = 0;
+        u32 flags;
+
+        if (chunk > 0x10000u)
+            chunk = 0x10000u;
+
+        result = MENU_HOST__FSFILE_Read(
+            source->file,
+            &read,
+            sourceOffset + copied,
+            scratch,
+            chunk
+        );
+        if (R_FAILED(result) || read != chunk)
+        {
+            result = R_FAILED(result) ? result : (Result)0xD8A0A06Cu;
+            goto done;
+        }
+
+        flags = copied + chunk == sourceSize ? FS_WRITE_FLUSH : 0;
+        result = MENU_HOST__FSFILE_Write(
+            outputFile,
+            &written,
+            copied,
+            scratch,
+            chunk,
+            flags
+        );
+        if (R_FAILED(result) || written != chunk)
+        {
+            result = R_FAILED(result) ? result : (Result)0xD8A0A06Du;
+            goto done;
+        }
+
+        copied += chunk;
+        if (!flags)
+            MENU_HOST__svcSleepThread(1000000LL);
+    }
+
+done:
+    if (outputFile)
+        MENU_HOST__FSFILE_Close(outputFile);
+    if (R_FAILED(result))
+    {
+        (void)MENU_HOST__FSUSER_DeleteFile(
+            source->archive,
+            MENU_HOST__fsMakePath(PATH_ASCII, outputPath)
+        );
+    }
+
+    PLUGIN_MENU_UnlockFetch();
+    if (scratchBase)
+        PLUGIN_MENU_TempFree(scratchBase, 0x10000u);
+    return result;
+}
+
 PLUGIN_CODE(MENU) Result PLUGIN_MENU_UnpackLz10File(
     const PluginMenuFileContext *source,
     u32 compressedOffset,
@@ -618,12 +727,12 @@ PLUGIN_CODE(MENU) Result PLUGIN_MENU_UnpackLz10File(
         return (Result)0xD8A0A062u;
     }
 
-    if (!PLUGIN_MENU_TempAlloc(0x2000u, &scratchBase))
+    if (!PLUGIN_MENU_TempAlloc(0x6000u, &scratchBase))
         return (Result)0xD8A0A067u;
     history = (u8 *)scratchBase;
     reader.buffer = history + 0x1000u;
-    reader.bufferSize = 0x400u;
-    flush = history + 0x1400u;
+    reader.bufferSize = 0x1000u;
+    flush = history + 0x2000u;
 
     // don't edit sources while an unpack is using them
     PLUGIN_MENU_LockFetch();
@@ -682,14 +791,17 @@ PLUGIN_CODE(MENU) Result PLUGIN_MENU_UnpackLz10File(
 #define FLUSH_OUT() do { \
     if (flushSize) { \
         u32 _written = 0; \
+        u32 _flags = outputOffset == uncompressedSize ? FS_WRITE_FLUSH : 0; \
         Result _result = MENU_HOST__FSFILE_Write( \
             outputFile, &_written, outputOffset - flushSize, \
-            flush, flushSize, FS_WRITE_FLUSH); \
+            flush, flushSize, _flags); \
         if (R_FAILED(_result) || _written != flushSize) { \
             result = R_FAILED(_result) ? _result : (Result)0xD8A0A066u; \
             goto unpack_done; \
         } \
         flushSize = 0; \
+        if (!_flags) \
+            MENU_HOST__svcSleepThread(1000000LL); \
     } \
 } while (0)
 #define EMIT(value) do { \
@@ -697,7 +809,7 @@ PLUGIN_CODE(MENU) Result PLUGIN_MENU_UnpackLz10File(
     HIST_SET(outputOffset, _value); \
     flush[flushSize++] = _value; \
     outputOffset++; \
-    if (flushSize == 0xC00u) \
+    if (flushSize == 0x4000u) \
         FLUSH_OUT(); \
 } while (0)
 
@@ -768,7 +880,7 @@ done:
     }
 
     PLUGIN_MENU_UnlockFetch();
-    PLUGIN_MENU_TempFree(scratchBase, 0x2000u);
+    PLUGIN_MENU_TempFree(scratchBase, 0x6000u);
     return result;
 }
 

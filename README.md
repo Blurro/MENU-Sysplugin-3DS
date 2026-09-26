@@ -30,7 +30,7 @@ Make sure **Load external FIRMs and modules** is enabled in the SELECT boot sett
 * Persistent per-plugin save data
 * Manage installed Sysplugins
 * Online Sysplugin sources and updates (add any source to `sysplgfetch.txt`)
-* Plugin metadata access and lz10 extraction helpers
+* Plugin metadata access and streamed raw/LZ10 extraction helpers
 * Temporary memory helpers for plugins
 * Downloadable `.3on` pages for extending the Online Menu
 * Loader-side title/HOME patch dispatcher for other Sysplugins
@@ -71,11 +71,14 @@ Provides persistent storage keyed by the plugin's 4-character ID.
 
 ```c
 bool PLUGIN_MENU_OpenPluginFile(u32 pluginId, PluginMenuFileContext *context);
+Result PLUGIN_MENU_ExtractRawFile(const PluginMenuFileContext *source, u32 sourceOffset, u32 sourceSize, const char *outputPath);
 Result PLUGIN_MENU_UnpackLz10File(const PluginMenuFileContext *source, u32 compressedOffset, u32 compressedSize, const char *outputPath);
 void PLUGIN_MENU_ClosePluginFile(PluginMenuFileContext *context);
 ```
 
 `OpenPluginFile` locates the selected `.3nx` containing a plugin ID and gives access to its entry/metadata offsets. This lets larger assets live in `.3nx` metadata instead of storing them in permanent memory, or requiring packaging alongside the `.3nx`
+
+`ExtractRawFile` copies an uncompressed metadata range with buffered writes. Both extraction helpers yield between chunks and flush only the final write.
 
 ### Online Menu sources
 
