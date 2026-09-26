@@ -51,9 +51,12 @@ Rosalina Sysplugins can use the MENU API by adding `MENU` to `allowed_refs` in `
 ### Menu registration
 
 ```c
+u32 PLUGIN_MENU_GetApiVersion(void);
 bool PLUGIN_MENU_AddItem(PluginMenuRegistration *item, u32 pluginId, const char *title, void (*callback)(void), u32 color);
 bool PLUGIN_MENU_RemoveItem(PluginMenuRegistration *item);
 ```
+
+`PLUGIN_MENU_GetApiVersion()` returns the Loader and Rosalina API revisions packed by `SYSPLUGIN_MENU_API_REVISION_PAIR`. Read them with `SYSPLUGIN_MENU_API_LOADER_REVISION()` and `SYSPLUGIN_MENU_API_PUBLIC_REVISION()`.
 
 Adds/removes pages from the Sysplugin Menu. The `PluginMenuRegistration` belongs to the calling plugin and must remain valid while registered.
 
@@ -135,6 +138,7 @@ The guards are required because compatible adjacent `MapProcessMemoryEx` mapping
 The Loader API deliberately keeps persistence, unpacking and Online Menu work on Rosalina. It exposes the five memory helpers, four patch-registration calls, and one queued bridge send call:
 
 ```c
+u32 PLUGIN_MENU_GetApiVersion(void);
 bool PLUGIN_MENU_FindFreeRange(u32 size, u32 *outBase);
 bool PLUGIN_MENU_TempAlloc(u32 size, u32 *outBase);
 void PLUGIN_MENU_TempFree(u32 base, u32 size);
@@ -147,6 +151,8 @@ bool PLUGIN_MENU_RegisterHomePatch(PluginMenuLoaderHomePatch *registration);
 bool PLUGIN_MENU_UnregisterHomePatch(PluginMenuLoaderHomePatch *registration);
 bool PLUGIN_MENU_BridgeSend(u32 targetPluginId, u32 command, const void *payload, u32 payloadSize);
 ```
+
+`PLUGIN_MENU_GetApiVersion()` returns the same packed revision pair from both MENU halves. A plugin with Loader and Rosalina entries should check both revisions before registering either side.
 
 One title registration can list every regional title ID it supports. `prepare` runs after Loader has built the `CodeSetHeader` but before `svcCreateCodeSet`; `processCreated` runs after `svcCreateProcess` succeeds; `loaderFinished` runs after Loader has closed its normal `plg:ldr` session. The target process has not started executing at any of those stages. Returning `false` from `prepare` suppresses that registration's later callbacks for the current launch without aborting the title.
 

@@ -63,6 +63,11 @@ PLUGIN_BSS(MENU) static bool g_MENUContextValid;
 extern bool PLUGIN_MENU_InstallLoaderHooks(void);
 extern bool g_MENUHooksReady;
 
+PLUGIN_CODE(MENU) u32 PLUGIN_MENU_GetApiVersion(void)
+{
+    return SYSPLUGIN_MENU_API_REVISION_PAIR;
+}
+
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_TitleMatches(
     const PluginMenuLoaderTitlePatch *registration,
     u64 titleId

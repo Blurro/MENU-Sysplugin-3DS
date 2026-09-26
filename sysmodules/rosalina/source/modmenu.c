@@ -353,6 +353,12 @@ PLUGIN_DATA(MENU) void *pluginTable_MENU[] = {
 PLUGIN_RODATA(MENU) const char g_MENUEntryTitle[] = "Sysplugin Menu";
 PLUGIN_RODATA(MENU) const char g_MENUUnreadText[] = "(!)";
 PLUGIN_RODATA(MENU) static const char g_MENUPluginsPath[] = "/luma/plugins";
+
+PLUGIN_CODE(MENU) u32 PLUGIN_MENU_GetApiVersion(void)
+{
+    return SYSPLUGIN_MENU_API_REVISION_PAIR;
+}
+
 PLUGIN_RODATA(MENU) static const char g_MENUStatePath[] = "/luma/modmenu.dat";
 PLUGIN_RODATA(MENU) static const char g_MENUTempPath[] = "/luma/modmenu.tmp";
 PLUGIN_RODATA(MENU) static const char g_MENUEmptyPath[] = "";
