@@ -183,10 +183,40 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageWasEnabledAtBoot(
            PLUGIN_MENU_ManageWasInBootSnapshot(name, disabled);
 }
 
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageSaveChanges(void)
+PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageFileMatches(
+    Handle file,
+    const void *data,
+    u32 size
+)
+{
+    u32 base = 0;
+    u32 allocSize = (size + 0xFFFu) & ~0xFFFu;
+    const u8 *source = (const u8 *)data;
+    const u8 *existing;
+    bool match = false;
+
+    if (!allocSize || !PLUGIN_MENU_TempAlloc(allocSize, &base))
+        return false;
+    existing = (const u8 *)base;
+    if (PLUGIN_MENU_ReadExact(file, 0, (void *)base, size))
+    {
+        match = true;
+        for (u32 i = 0; i < size; i++)
+            if (existing[i] != source[i])
+            {
+                match = false;
+                break;
+            }
+    }
+    PLUGIN_MENU_TempFree(base, allocSize);
+    return match;
+}
+
+PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageSaveExact(const void *data, u32 size)
 {
     FS_Archive archive = 0;
     Handle file = 0;
+    u64 oldSize = 0;
     bool success = false;
 
     if (R_FAILED(MENU_HOST__FSUSER_OpenArchive(
@@ -195,27 +225,46 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageSaveChanges(void)
             MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
         return false;
 
-    (void)MENU_HOST__FSUSER_DeleteFile(
-        archive,
-        MENU_HOST__fsMakePath(PATH_ASCII, g_MENUManageTempListPath));
+    if (!size)
+    {
+        (void)MENU_HOST__FSUSER_DeleteFile(
+            archive,
+            MENU_HOST__fsMakePath(PATH_ASCII, g_MENUManageTempListPath));
+        success = true;
+        goto done;
+    }
 
-    if (!g_MENUManageChangeSize)
+    if (R_SUCCEEDED(MENU_HOST__FSUSER_OpenFile(
+            &file,
+            archive,
+            MENU_HOST__fsMakePath(PATH_ASCII, g_MENUManageTempListPath),
+            FS_OPEN_READ | FS_OPEN_WRITE,
+            0)))
+    {
+        if (R_FAILED(MENU_HOST__FSFILE_GetSize(file, &oldSize)))
+            goto done;
+    }
+    else if (R_FAILED(MENU_HOST__FSUSER_OpenFile(
+                 &file,
+                 archive,
+                 MENU_HOST__fsMakePath(PATH_ASCII, g_MENUManageTempListPath),
+                 FS_OPEN_WRITE | FS_OPEN_CREATE,
+                 0)))
+    {
+        goto done;
+    }
+
+    if (oldSize == size && PLUGIN_MENU_ManageFileMatches(file, data, size))
     {
         success = true;
         goto done;
     }
 
-    if (R_FAILED(MENU_HOST__FSUSER_OpenFile(
-            &file,
-            archive,
-            MENU_HOST__fsMakePath(PATH_ASCII, g_MENUManageTempListPath),
-            FS_OPEN_WRITE | FS_OPEN_CREATE,
-            0)) ||
-        R_FAILED(MENU_HOST__FSFILE_SetSize(file, g_MENUManageChangeSize)) ||
-        !PLUGIN_MENU_WriteExact(file, 0, g_MENUManageChanges, g_MENUManageChangeSize))
-    {
+    if (oldSize != size && R_FAILED(MENU_HOST__FSFILE_SetSize(file, size)))
         goto done;
-    }
+    if (!PLUGIN_MENU_WriteExact(file, 0, data, size))
+        goto done;
+
     success = true;
 
 done:
@@ -225,21 +274,14 @@ done:
     return success;
 }
 
+PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageSaveChanges(void)
+{
+    return PLUGIN_MENU_ManageSaveExact(g_MENUManageChanges, g_MENUManageChangeSize);
+}
+
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_ManageResetTempList(void)
 {
-    FS_Archive archive = 0;
     g_MENUManageChangeSize = 0;
-
-    if (R_SUCCEEDED(MENU_HOST__FSUSER_OpenArchive(
-            &archive,
-            ARCHIVE_SDMC,
-            MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
-    {
-        (void)MENU_HOST__FSUSER_DeleteFile(
-            archive,
-            MENU_HOST__fsMakePath(PATH_ASCII, g_MENUManageTempListPath));
-        MENU_HOST__FSUSER_CloseArchive(archive);
-    }
 }
 
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageParseName(
@@ -405,44 +447,9 @@ done:
 
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_SyspluginStateSave(const PluginMenuSyspluginStateScratch *scratch)
 {
-    FS_Archive archive = 0;
-    Handle file = 0;
-    bool success = false;
-
-    if (!scratch || scratch->size > MENU_MANAGE_TEMP_BYTES ||
-        R_FAILED(MENU_HOST__FSUSER_OpenArchive(
-            &archive,
-            ARCHIVE_SDMC,
-            MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
+    if (!scratch || scratch->size > MENU_MANAGE_TEMP_BYTES)
         return false;
-
-    (void)MENU_HOST__FSUSER_DeleteFile(
-        archive,
-        MENU_HOST__fsMakePath(PATH_ASCII, g_MENUManageTempListPath));
-
-    if (!scratch->size)
-    {
-        success = true;
-        goto done;
-    }
-
-    if (R_FAILED(MENU_HOST__FSUSER_OpenFile(
-            &file,
-            archive,
-            MENU_HOST__fsMakePath(PATH_ASCII, g_MENUManageTempListPath),
-            FS_OPEN_WRITE | FS_OPEN_CREATE,
-            0)) ||
-        R_FAILED(MENU_HOST__FSFILE_SetSize(file, scratch->size)) ||
-        !PLUGIN_MENU_WriteExact(file, 0, scratch->changes, scratch->size))
-        goto done;
-
-    success = true;
-
-done:
-    if (file)
-        MENU_HOST__FSFILE_Close(file);
-    MENU_HOST__FSUSER_CloseArchive(archive);
-    return success;
+    return PLUGIN_MENU_ManageSaveExact(scratch->changes, scratch->size);
 }
 
 PLUGIN_CODE(MENU) static u32 PLUGIN_MENU_SyspluginCanonicalLength(const char *name, bool disabled)
@@ -1089,8 +1096,8 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_ManageCaptureBootSnapshot(void)
 
     g_MENUManageCapturingBoot = true;
     g_MENUManageChangeSize = 0;
-    if (PLUGIN_MENU_ManageBuildList())
-        (void)PLUGIN_MENU_ManageSaveBootSnapshot();
+    if (!PLUGIN_MENU_ManageBuildList() || !PLUGIN_MENU_ManageSaveBootSnapshot())
+        (void)PLUGIN_MENU_ManageSaveExact(NULL, 0);
     g_MENUManageCapturingBoot = false;
     PLUGIN_MENU_ManageFreeScratch();
 }
