@@ -34,6 +34,7 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageAllocScratch(void)
     g_MENUManageActiveCount = 0;
     g_MENUManageNameUsed = 0;
     g_MENUManageChangeSize = 0;
+    g_MENUManageShowInstallHint = false;
     return true;
 }
 
@@ -52,6 +53,7 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_ManageFreeScratch(void)
     g_MENUManageActiveCount = 0;
     g_MENUManageNameUsed = 0;
     g_MENUManageChangeSize = 0;
+    g_MENUManageShowInstallHint = false;
 }
 
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_ManageLoadChanges(void)
@@ -137,151 +139,80 @@ PLUGIN_CODE(MENU) static char PLUGIN_MENU_ManageFindChange(
     return 0;
 }
 
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageWasInBootSnapshot(
-    const char *name,
-    bool disabled
-)
-{
-    u32 wanted = PLUGIN_MENU_ManageCanonicalLength(name, disabled);
-    u32 pos = 0;
-
-    while (pos < g_MENUManageChangeSize)
-    {
-        u32 start = pos;
-        while (pos < g_MENUManageChangeSize && g_MENUManageChanges[pos] != '\n')
-            pos++;
-        u32 textEnd = pos;
-        u32 end = pos < g_MENUManageChangeSize ? pos + 1u : pos;
-        bool stateLine = textEnd >= start + 2u &&
-            (g_MENUManageChanges[start] == 'D' ||
-             g_MENUManageChanges[start] == 'E' ||
-             g_MENUManageChanges[start] == 'P') &&
-            g_MENUManageChanges[start + 1u] == '|';
-        bool match = !stateLine && textEnd - start == wanted;
-
-        for (u32 i = 0; match && i < wanted; i++)
-            if (g_MENUManageChanges[start + i] != name[i])
-                match = false;
-        if (match)
-            return true;
-        pos = end;
-    }
-    return false;
-}
-
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageWasEnabledAtBoot(
-    const char *name,
-    bool disabled
-)
-{
-    char change = PLUGIN_MENU_ManageFindChange(name, disabled, NULL, NULL);
-    if (disabled)
-        return change == 'E';
-    if (change == 'D')
-        return false;
-    return g_MENUManageCapturingBoot ||
-           PLUGIN_MENU_ManageWasInBootSnapshot(name, disabled);
-}
-
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageFileMatches(
-    Handle file,
-    const void *data,
-    u32 size
-)
-{
-    u32 base = 0;
-    u32 allocSize = (size + 0xFFFu) & ~0xFFFu;
-    const u8 *source = (const u8 *)data;
-    const u8 *existing;
-    bool match = false;
-
-    if (!allocSize || !PLUGIN_MENU_TempAlloc(allocSize, &base))
-        return false;
-    existing = (const u8 *)base;
-    if (PLUGIN_MENU_ReadExact(file, 0, (void *)base, size))
-    {
-        match = true;
-        for (u32 i = 0; i < size; i++)
-            if (existing[i] != source[i])
-            {
-                match = false;
-                break;
-            }
-    }
-    PLUGIN_MENU_TempFree(base, allocSize);
-    return match;
-}
-
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageSaveExact(const void *data, u32 size)
 {
     FS_Archive archive = 0;
     Handle file = 0;
     u64 oldSize = 0;
     bool success = false;
-
-    if (R_FAILED(MENU_HOST__FSUSER_OpenArchive(
-            &archive,
-            ARCHIVE_SDMC,
-            MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
+    if (R_FAILED(MENU_HOST__FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
         return false;
-
     if (!size)
     {
-        (void)MENU_HOST__FSUSER_DeleteFile(
-            archive,
-            MENU_HOST__fsMakePath(PATH_ASCII, g_MENUManageTempListPath));
+        (void) MENU_HOST__FSUSER_DeleteFile(archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUManageTempListPath));
         success = true;
         goto done;
     }
-
-    if (R_SUCCEEDED(MENU_HOST__FSUSER_OpenFile(
-            &file,
-            archive,
-            MENU_HOST__fsMakePath(PATH_ASCII, g_MENUManageTempListPath),
-            FS_OPEN_READ | FS_OPEN_WRITE,
-            0)))
+    if (R_SUCCEEDED(MENU_HOST__FSUSER_OpenFile(&file, archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUManageTempListPath), FS_OPEN_READ | FS_OPEN_WRITE, 0)))
     {
         if (R_FAILED(MENU_HOST__FSFILE_GetSize(file, &oldSize)))
             goto done;
     }
-    else if (R_FAILED(MENU_HOST__FSUSER_OpenFile(
-                 &file,
-                 archive,
-                 MENU_HOST__fsMakePath(PATH_ASCII, g_MENUManageTempListPath),
-                 FS_OPEN_WRITE | FS_OPEN_CREATE,
-                 0)))
+    else if (R_FAILED(MENU_HOST__FSUSER_OpenFile(&file, archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUManageTempListPath), FS_OPEN_WRITE | FS_OPEN_CREATE, 0)))
     {
         goto done;
     }
+    bool fileMatchesCondition = (oldSize == size) != 0;
+    if (fileMatchesCondition)
+    {
+        bool fileMatchesResult;
+        {
+            Handle fileMatchesFile = file;
+            u32 base = 0;
+            u32 allocSize = (size + 0xFFFu) & ~0xFFFu;
+            const u8 *source = (const u8 *) data;
+            const u8 *existing;
+            bool match = false;
+            if (!allocSize || !PLUGIN_MENU_TempAlloc(allocSize, &base))
+            {
+                fileMatchesResult = false;
+                goto fileMatchesDone;
+            }
+            existing = (const u8 *) base;
+            if (PLUGIN_MENU_ReadExact(fileMatchesFile, 0, (void *) base, size))
+            {
+                match = true;
+                for (u32 i = 0; i < size; i++)
+                    if (existing[i] != source[i])
+                {
+                    match = false;
+                    break;
+                }
 
-    if (oldSize == size && PLUGIN_MENU_ManageFileMatches(file, data, size))
+            }
+            PLUGIN_MENU_TempFree(base, allocSize);
+            fileMatchesResult = match;
+            fileMatchesDone:;
+
+        }
+        fileMatchesCondition = fileMatchesResult != 0;
+    }
+    if (fileMatchesCondition)
     {
         success = true;
         goto done;
     }
-
     if (oldSize != size && R_FAILED(MENU_HOST__FSFILE_SetSize(file, size)))
         goto done;
     if (!PLUGIN_MENU_WriteExact(file, 0, data, size))
         goto done;
-
     success = true;
-
-done:
+    done:
     if (file)
         MENU_HOST__FSFILE_Close(file);
+
     MENU_HOST__FSUSER_CloseArchive(archive);
     return success;
-}
-
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageSaveChanges(void)
-{
-    return PLUGIN_MENU_ManageSaveExact(g_MENUManageChanges, g_MENUManageChangeSize);
-}
-
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_ManageResetTempList(void)
-{
-    g_MENUManageChangeSize = 0;
 }
 
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageParseName(
@@ -333,7 +264,6 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageParseName(
     return true;
 }
 
-
 typedef struct
 {
     u32 base;
@@ -347,28 +277,34 @@ typedef struct
 
 #define MENU_SYSPLUGIN_STATE_SCRATCH_SIZE 0x3000u
 
-PLUGIN_CODE(MENU) static const char *PLUGIN_MENU_SyspluginFilename(const char *pathOrName)
-{
-    const char *name = pathOrName;
-    if (!name)
-        return NULL;
-    for (const char *p = pathOrName; *p; p++)
-        if (*p == '/')
-            name = p + 1;
-    return name;
-}
-
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_SyspluginCopyName(char *out, u32 outSize, const char *pathOrName)
 {
-    const char *name = PLUGIN_MENU_SyspluginFilename(pathOrName);
+    const char *syspluginFilenameResult;
+    {
+        const char *name = pathOrName;
+        if (!name)
+        {
+            syspluginFilenameResult = NULL;
+            goto syspluginFilenameDone;
+        }
+        for (const char *p = pathOrName; *p; p++)
+            if (*p == '/')
+            name = p + 1;
+
+        syspluginFilenameResult = name;
+        syspluginFilenameDone:;
+
+    }
+    const char *name = syspluginFilenameResult;
     u32 length;
-    if (!out || !outSize || !name || !*name)
+    if (!out || !outSize || !name || !(*name))
         return false;
     length = PLUGIN_MENU_StringLength(name);
-    if (!length || length + 1u > outSize)
+    if (!length || (length + 1u) > outSize)
         return false;
     for (u32 i = 0; i <= length; i++)
         out[i] = name[i];
+
     return true;
 }
 
@@ -496,73 +432,6 @@ PLUGIN_CODE(MENU) static char PLUGIN_MENU_SyspluginFindChange(
     return 0;
 }
 
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_SyspluginFindPending(
-    const PluginMenuSyspluginStateScratch *scratch,
-    const char *name,
-    bool disabled,
-    u32 *lineStart,
-    u32 *lineEnd)
-{
-    u32 wanted = PLUGIN_MENU_SyspluginCanonicalLength(name, disabled);
-    u32 pos = 0;
-    while (pos < scratch->size)
-    {
-        u32 start = pos;
-        while (pos < scratch->size && scratch->changes[pos] != '\n')
-            pos++;
-        u32 textEnd = pos;
-        u32 end = pos < scratch->size ? pos + 1u : pos;
-        if (textEnd >= start + 2u && scratch->changes[start] == 'P' &&
-            scratch->changes[start + 1u] == '|')
-        {
-            u32 textStart = start + 2u;
-            u32 textLength = textEnd - textStart;
-            bool match = textLength == wanted;
-            for (u32 i = 0; match && i < wanted; i++)
-                if (scratch->changes[textStart + i] != name[i])
-                    match = false;
-            if (match)
-            {
-                if (lineStart) *lineStart = start;
-                if (lineEnd) *lineEnd = end;
-                return true;
-            }
-        }
-        pos = end;
-    }
-    return false;
-}
-
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_SyspluginWasInBootSnapshot(
-    const PluginMenuSyspluginStateScratch *scratch,
-    const char *name,
-    bool disabled)
-{
-    u32 wanted = PLUGIN_MENU_SyspluginCanonicalLength(name, disabled);
-    u32 pos = 0;
-    while (pos < scratch->size)
-    {
-        u32 start = pos;
-        while (pos < scratch->size && scratch->changes[pos] != '\n')
-            pos++;
-        u32 textEnd = pos;
-        u32 end = pos < scratch->size ? pos + 1u : pos;
-        bool stateLine = textEnd >= start + 2u &&
-            (scratch->changes[start] == 'D' ||
-             scratch->changes[start] == 'E' ||
-             scratch->changes[start] == 'P') &&
-            scratch->changes[start + 1u] == '|';
-        bool match = !stateLine && textEnd - start == wanted;
-        for (u32 i = 0; match && i < wanted; i++)
-            if (scratch->changes[start + i] != name[i])
-                match = false;
-        if (match)
-            return true;
-        pos = end;
-    }
-    return false;
-}
-
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_SyspluginRemoveLine(
     PluginMenuSyspluginStateScratch *scratch,
     u32 start,
@@ -607,21 +476,65 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_SyspluginSetPending(
     bool disabled,
     bool pending)
 {
-    u32 start = 0, end = 0;
-    bool old = PLUGIN_MENU_SyspluginFindPending(scratch, name, disabled, &start, &end);
+    u32 start = 0;
+    u32 end = 0;
+    bool old;
+    {
+        const PluginMenuSyspluginStateScratch *findPendingScratch = scratch;
+        u32 *findPendingLineStart = &start;
+        u32 *findPendingLineEnd = &end;
+        u32 wanted = PLUGIN_MENU_SyspluginCanonicalLength(name, disabled);
+        u32 pos = 0;
+        while (pos < findPendingScratch->size)
+        {
+            u32 start = pos;
+            while (pos < findPendingScratch->size && findPendingScratch->changes[pos] != '\n')
+                pos++;
+
+            u32 textEnd = pos;
+            u32 end = (pos < findPendingScratch->size) ? (pos + 1u) : (pos);
+            if (textEnd >= (start + 2u) && findPendingScratch->changes[start] == 'P' && findPendingScratch->changes[start + 1u] == '|')
+            {
+                u32 textStart = start + 2u;
+                u32 textLength = textEnd - textStart;
+                bool match = textLength == wanted;
+                for (u32 i = 0; match && i < wanted; i++)
+                    if (findPendingScratch->changes[textStart + i] != name[i])
+                    match = false;
+
+                if (match)
+                {
+                    if (findPendingLineStart)
+                        *findPendingLineStart = start;
+                    if (findPendingLineEnd)
+                        *findPendingLineEnd = end;
+                    {
+                        old = true;
+                        goto findPendingDone;
+                    }
+                }
+            }
+            pos = end;
+        }
+
+        old = false;
+        findPendingDone:;
+
+    }
     if (old)
         PLUGIN_MENU_SyspluginRemoveLine(scratch, start, end);
     if (pending)
     {
         u32 length = PLUGIN_MENU_SyspluginCanonicalLength(name, disabled);
         u32 need = length + 3u;
-        if (!length || scratch->size + need > MENU_MANAGE_TEMP_BYTES)
+        if (!length || (scratch->size + need) > MENU_MANAGE_TEMP_BYTES)
             return false;
         u32 pos = scratch->size;
         scratch->changes[pos++] = 'P';
         scratch->changes[pos++] = '|';
         for (u32 i = 0; i < length; i++)
             scratch->changes[pos++] = name[i];
+
         scratch->changes[pos++] = '\n';
         scratch->size = pos;
     }
@@ -706,21 +619,17 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_SetSyspluginDisabled(const char *pathO
     bool wasEnabledAtBoot;
     char nextState;
     u32 length;
-
     PLUGIN_MENU_LockWord(&g_MENUSyspluginStateLock);
-    if (!PLUGIN_MENU_SyspluginStateAlloc(&scratch) ||
-        !PLUGIN_MENU_SyspluginCopyName(scratch.name, 256u, pathOrName) ||
-        !PLUGIN_MENU_ManageParseName(scratch.name, &priority, &disabled) ||
-        disabled == disable ||
-        !PLUGIN_MENU_SyspluginStateLoad(&scratch))
+    if (!PLUGIN_MENU_SyspluginStateAlloc(&scratch) || !PLUGIN_MENU_SyspluginCopyName(scratch.name, 256u, pathOrName) || !PLUGIN_MENU_ManageParseName(scratch.name, &priority, &disabled) || disabled == disable || !PLUGIN_MENU_SyspluginStateLoad(&scratch))
         goto done;
-
     length = PLUGIN_MENU_StringLength(scratch.name);
     if (disable)
     {
-        if (length + 3u > 256u)
+        if ((length + 3u) > 256u)
             goto done;
-        for (u32 i = 0; i < length; i++) scratch.otherName[i] = scratch.name[i];
+        for (u32 i = 0; i < length; i++)
+            scratch.otherName[i] = scratch.name[i];
+
         scratch.otherName[length] = '.';
         scratch.otherName[length + 1u] = 'd';
         scratch.otherName[length + 2u] = 0;
@@ -729,32 +638,67 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_SetSyspluginDisabled(const char *pathO
     {
         if (length < 2u || scratch.name[length - 2u] != '.' || scratch.name[length - 1u] != 'd')
             goto done;
-        for (u32 i = 0; i < length - 2u; i++) scratch.otherName[i] = scratch.name[i];
+        for (u32 i = 0; i < (length - 2u); i++)
+            scratch.otherName[i] = scratch.name[i];
+
         scratch.otherName[length - 2u] = 0;
     }
-
     existing = PLUGIN_MENU_SyspluginFindChange(&scratch, scratch.name, disabled, NULL, NULL);
-    wasEnabledAtBoot = existing == 'E' ||
-        (existing != 'D' && PLUGIN_MENU_SyspluginWasInBootSnapshot(&scratch, scratch.name, disabled));
-    nextState = disable ? (wasEnabledAtBoot ? 'E' : 0) : (wasEnabledAtBoot ? 0 : 'D');
+    bool bootSnapshotCondition3 = (existing == 'E') != 0;
+    if (!bootSnapshotCondition3)
+    {
+        bool bootSnapshotCondition2 = (existing != 'D') != 0;
+        if (bootSnapshotCondition2)
+        {
+            bool bootSnapshotResult2;
+            {
+                const char *bootSnapshotName = scratch.name;
+                bool bootSnapshotDisabled = disabled;
+                u32 wanted = PLUGIN_MENU_SyspluginCanonicalLength(bootSnapshotName, bootSnapshotDisabled);
+                u32 pos = 0;
+                while (pos < scratch.size)
+                {
+                    u32 start = pos;
+                    while (pos < scratch.size && scratch.changes[pos] != '\n')
+                        pos++;
 
-    if (!PLUGIN_MENU_SyspluginSetPending(&scratch, scratch.name, disabled, false) ||
-        !PLUGIN_MENU_SyspluginSetChange(&scratch, scratch.name, disabled, nextState) ||
-        !PLUGIN_MENU_MakePluginPathTo(scratch.path, 272u, scratch.name) ||
-        !PLUGIN_MENU_MakePluginPathTo(scratch.otherPath, 272u, scratch.otherName) ||
-        PLUGIN_MENU_SyspluginFileExists(scratch.otherPath) ||
-        !PLUGIN_MENU_SyspluginRenameFile(scratch.path, scratch.otherPath))
+                    u32 textEnd = pos;
+                    u32 end = (pos < scratch.size) ? (pos + 1u) : (pos);
+                    bool stateLine = textEnd >= (start + 2u) && (scratch.changes[start] == 'D' || scratch.changes[start] == 'E' || scratch.changes[start] == 'P') && scratch.changes[start + 1u] == '|';
+                    bool match = !stateLine && (textEnd - start) == wanted;
+                    for (u32 i = 0; match && i < wanted; i++)
+                        if (scratch.changes[start + i] != bootSnapshotName[i])
+                        match = false;
+
+                    if (match)
+                    {
+                        bootSnapshotResult2 = true;
+                        goto bootSnapshotDone3;
+                    }
+                    pos = end;
+                }
+
+                bootSnapshotResult2 = false;
+                bootSnapshotDone3:;
+
+            }
+            bootSnapshotCondition2 = bootSnapshotResult2 != 0;
+        }
+        bootSnapshotCondition3 = bootSnapshotCondition2 != 0;
+    }
+    wasEnabledAtBoot = bootSnapshotCondition3;
+    nextState = (disable) ? ((wasEnabledAtBoot) ? ('E') : (0)) : ((wasEnabledAtBoot) ? (0) : ('D'));
+    if (!PLUGIN_MENU_SyspluginSetPending(&scratch, scratch.name, disabled, false) || !PLUGIN_MENU_SyspluginSetChange(&scratch, scratch.name, disabled, nextState) || !PLUGIN_MENU_MakePluginPathTo(scratch.path, 272u, scratch.name) || !PLUGIN_MENU_MakePluginPathTo(scratch.otherPath, 272u, scratch.otherName) || PLUGIN_MENU_SyspluginFileExists(scratch.otherPath) || !PLUGIN_MENU_SyspluginRenameFile(scratch.path, scratch.otherPath))
         goto done;
-
     if (!PLUGIN_MENU_SyspluginStateSave(&scratch))
     {
-        (void)PLUGIN_MENU_SyspluginRenameFile(scratch.otherPath, scratch.path);
+        (void) PLUGIN_MENU_SyspluginRenameFile(scratch.otherPath, scratch.path);
         goto done;
     }
     success = true;
-
-done:
+    done:
     PLUGIN_MENU_SyspluginStateFree(&scratch);
+
     PLUGIN_MENU_UnlockWord(&g_MENUSyspluginStateLock);
     return success;
 }
@@ -815,32 +759,47 @@ PLUGIN_CODE(MENU) static const char *PLUGIN_MENU_ManageName(const PluginMenuMana
     return &g_MENUManageNames[file->nameOffset];
 }
 
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageFileEarlier(
-    const PluginMenuManageFile *a,
-    const PluginMenuManageFile *b,
-    bool grouped
-)
-{
-    if (grouped && a->group != b->group)
-        return a->group < b->group;
-    if (a->priority != b->priority)
-        return a->priority < b->priority;
-    return PLUGIN_MENU_StringCompare(PLUGIN_MENU_ManageName(a), PLUGIN_MENU_ManageName(b)) < 0;
-}
-
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_ManageSort(bool grouped)
 {
     for (u32 i = 1; i < g_MENUManageFileCount; i++)
     {
         PluginMenuManageFile value = g_MENUManageFiles[i];
         u32 j = i;
-        while (j && PLUGIN_MENU_ManageFileEarlier(&value, &g_MENUManageFiles[j - 1u], grouped))
+        while (1)
         {
-            g_MENUManageFiles[j] = g_MENUManageFiles[j - 1u];
-            j--;
+            bool fileEarlierCondition = j != 0;
+            if (fileEarlierCondition)
+            {
+                bool fileEarlierResult;
+                {
+                    const PluginMenuManageFile *fileEarlierB = &g_MENUManageFiles[j - 1u];
+                    if (grouped && value.group != fileEarlierB->group)
+                    {
+                        fileEarlierResult = value.group < fileEarlierB->group;
+                        goto fileEarlierDone;
+                    }
+                    if (value.priority != fileEarlierB->priority)
+                    {
+                        fileEarlierResult = value.priority < fileEarlierB->priority;
+                        goto fileEarlierDone;
+                    }
+                    fileEarlierResult = PLUGIN_MENU_StringCompare(PLUGIN_MENU_ManageName(&value), PLUGIN_MENU_ManageName(fileEarlierB)) < 0;
+                    fileEarlierDone:;
+
+                }
+                fileEarlierCondition = fileEarlierResult != 0;
+            }
+            if (!fileEarlierCondition)
+                break;
+            {
+                g_MENUManageFiles[j] = g_MENUManageFiles[j - 1u];
+                j--;
+            }
         }
+
         g_MENUManageFiles[j] = value;
     }
+
 }
 
 PLUGIN_CODE(MENU) static PluginMenuManageWinner *PLUGIN_MENU_ManageFindWinner(
@@ -874,103 +833,19 @@ PLUGIN_CODE(MENU) static PluginMenuManageWinner *PLUGIN_MENU_ManageFindWinner(
     return NULL;
 }
 
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageWinnerMatches(
-    u32 magic,
-    u32 pluginId,
-    u16 nameOffset,
-    u32 fileOffset
-)
-{
-    PluginMenuManageWinner *winner = PLUGIN_MENU_ManageFindWinner(magic, pluginId);
-    return winner && winner->nameOffset == nameOffset && winner->fileOffset == fileOffset;
-}
-
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_ManageBuildSelection(FS_Archive archive)
-{
-    if (!g_MENUManageSelection)
-        return;
-    g_MENUManageSelection->loaderCount = 0;
-    g_MENUManageSelection->rosalinaCount = 0;
-
-    for (u32 i = 0; i < g_MENUManageFileCount; i++)
-    {
-        PluginMenuManageFile *item = &g_MENUManageFiles[i];
-        item->selected = 0;
-        if (!item->bootActive || !PLUGIN_MENU_MakePluginPath(PLUGIN_MENU_ManageName(item)))
-            continue;
-
-        Handle file = 0;
-        if (R_FAILED(MENU_HOST__FSUSER_OpenFile(
-                &file,
-                archive,
-                MENU_HOST__fsMakePath(PATH_ASCII, g_MENUScanPath),
-                FS_OPEN_READ,
-                0)))
-            continue;
-
-        u32 offset = 0;
-        for (;;)
-        {
-            PluginMenu3nxHeader header;
-            u32 metadataOffset;
-            u32 nextOffset;
-            if (!PLUGIN_MENU_ReadHeader(file, offset, &header, &metadataOffset, &nextOffset) ||
-                (header.magic != MENU_PLUGIN_MAGIC && header.magic != LOADER_PLUGIN_MAGIC))
-                break;
-
-            PluginMenuManageWinner *winners = header.magic == LOADER_PLUGIN_MAGIC ?
-                g_MENUManageSelection->loader : g_MENUManageSelection->rosalina;
-            u32 *count = header.magic == LOADER_PLUGIN_MAGIC ?
-                &g_MENUManageSelection->loaderCount : &g_MENUManageSelection->rosalinaCount;
-            if (*count < MENU_SYSPLUGIN_MAX_PLUGINS &&
-                !PLUGIN_MENU_ManageFindWinner(header.magic, header.pluginId))
-            {
-                PluginMenuManageWinner *winner = &winners[*count];
-                winner->magic = header.magic;
-                winner->pluginId = header.pluginId;
-                winner->nameOffset = item->nameOffset;
-                winner->reserved = 0;
-                winner->fileOffset = offset;
-                (*count)++;
-                item->selected = 1;
-
-                if (g_MENUManageCapturingBoot &&
-                    header.magic == MENU_PLUGIN_MAGIC &&
-                    header.pluginId == MENU_PLUGIN_ID)
-                {
-                    g_MENUBootSelf.found = true;
-                    g_MENUBootSelf.entryOffset = offset;
-                    g_MENUBootSelf.metadataOffset = metadataOffset;
-                    g_MENUBootSelf.metadataSize = header.metadataSize;
-                    g_MENUBootSelf.expectedEnvLo = header.expectedEnvLo;
-                    g_MENUBootSelf.expectedEnvHi = header.expectedEnvHi;
-                }
-            }
-            offset = nextOffset;
-        }
-        MENU_HOST__FSFILE_Close(file);
-    }
-}
-
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageBuildList(void)
 {
     FS_Archive archive = 0;
     Handle directory = 0;
     bool scanComplete = false;
+    u32 enabledCount = 0;
+    u16 enabledNameOffset = 0;
     g_MENUManageFileCount = 0;
     g_MENUManageActiveCount = 0;
     g_MENUManageNameUsed = 0;
-
-    if (R_FAILED(MENU_HOST__FSUSER_OpenArchive(
-            &archive,
-            ARCHIVE_SDMC,
-            MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))) ||
-        R_FAILED(MENU_HOST__FSUSER_OpenDirectory(
-            &directory,
-            archive,
-            MENU_HOST__fsMakePath(PATH_ASCII, g_MENUPluginsPath))))
+    g_MENUManageShowInstallHint = false;
+    if (R_FAILED(MENU_HOST__FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))) || R_FAILED(MENU_HOST__FSUSER_OpenDirectory(&directory, archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUPluginsPath))))
         goto done;
-
     while (g_MENUManageFileCount < MENU_MANAGE_MAX_FILES)
     {
         u32 read = 0;
@@ -983,24 +858,21 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageBuildList(void)
         }
         if (g_MENUScanEntry.attributes & FS_ATTRIBUTE_DIRECTORY)
             continue;
-
         u32 length = 0;
-        while (length + 1u < sizeof(g_MENUScanName) && g_MENUScanEntry.name[length])
+        while ((length + 1u) < sizeof(g_MENUScanName) && g_MENUScanEntry.name[length])
         {
-            g_MENUScanName[length] = (char)g_MENUScanEntry.name[length];
+            g_MENUScanName[length] = (char) g_MENUScanEntry.name[length];
             length++;
         }
-        g_MENUScanName[length] = 0;
 
+        g_MENUScanName[length] = 0;
         u32 priority;
         bool disabled;
-        if (!PLUGIN_MENU_ManageParseName(g_MENUScanName, &priority, &disabled) ||
-            g_MENUManageNameUsed + length + 1u > MENU_MANAGE_NAME_BYTES)
+        if (!PLUGIN_MENU_ManageParseName(g_MENUScanName, &priority, &disabled) || (g_MENUManageNameUsed + length + 1u) > MENU_MANAGE_NAME_BYTES)
             continue;
-
         PluginMenuManageFile *item = &g_MENUManageFiles[g_MENUManageFileCount++];
         item->priority = priority;
-        item->nameOffset = (u16)g_MENUManageNameUsed;
+        item->nameOffset = (u16) g_MENUManageNameUsed;
         item->currentDisabled = disabled;
         item->selected = 0;
         item->group = 0;
@@ -1008,108 +880,184 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageBuildList(void)
         const volatile char *nameIn = g_MENUScanName;
         for (u32 i = 0; i <= length; i++)
             nameOut[i] = nameIn[i];
-        g_MENUManageNameUsed += length + 1u;
 
-        item->bootActive = PLUGIN_MENU_ManageWasEnabledAtBoot(g_MENUScanName, disabled);
+        g_MENUManageNameUsed += length + 1u;
+        bool atBootResult;
+        {
+            const char *atBootName = g_MENUScanName;
+            bool atBootDisabled = disabled;
+            char change = PLUGIN_MENU_ManageFindChange(atBootName, atBootDisabled, NULL, NULL);
+            if (atBootDisabled)
+            {
+                atBootResult = change == 'E';
+                goto atBootDone;
+            }
+            if (change == 'D')
+            {
+                atBootResult = false;
+                goto atBootDone;
+            }
+            bool bootSnapshotCondition4 = g_MENUManageCapturingBoot != 0;
+            if (!bootSnapshotCondition4)
+            {
+                bool bootSnapshotResult3;
+                {
+                    const char *bootSnapshotName2 = atBootName;
+                    bool bootSnapshotDisabled2 = atBootDisabled;
+                    u32 wanted = PLUGIN_MENU_ManageCanonicalLength(bootSnapshotName2, bootSnapshotDisabled2);
+                    u32 pos = 0;
+                    while (pos < g_MENUManageChangeSize)
+                    {
+                        u32 start = pos;
+                        while (pos < g_MENUManageChangeSize && g_MENUManageChanges[pos] != '\n')
+                            pos++;
+
+                        u32 textEnd = pos;
+                        u32 end = (pos < g_MENUManageChangeSize) ? (pos + 1u) : (pos);
+                        bool stateLine = textEnd >= (start + 2u) && (g_MENUManageChanges[start] == 'D' || g_MENUManageChanges[start] == 'E' || g_MENUManageChanges[start] == 'P') && g_MENUManageChanges[start + 1u] == '|';
+                        bool match = !stateLine && (textEnd - start) == wanted;
+                        for (u32 i = 0; match && i < wanted; i++)
+                            if (g_MENUManageChanges[start + i] != bootSnapshotName2[i])
+                            match = false;
+
+                        if (match)
+                        {
+                            bootSnapshotResult3 = true;
+                            goto bootSnapshotDone4;
+                        }
+                        pos = end;
+                    }
+
+                    bootSnapshotResult3 = false;
+                    bootSnapshotDone4:;
+
+                }
+                bootSnapshotCondition4 = bootSnapshotResult3 != 0;
+            }
+            atBootResult = bootSnapshotCondition4;
+            atBootDone:;
+
+        }
+        item->bootActive = atBootResult;
     }
 
     if (g_MENUManageFileCount == MENU_MANAGE_MAX_FILES)
         scanComplete = true;
-
     MENU_HOST__FSDIR_Close(directory);
     directory = 0;
-
     if (!scanComplete)
         goto done;
-
     // same order K11 uses: priority, filename, stack offset
     PLUGIN_MENU_ManageSort(false);
-    PLUGIN_MENU_ManageBuildSelection(archive);
+    {
+        FS_Archive buildSelectionArchive = archive;
+        if (!g_MENUManageSelection)
+            goto buildSelectionDone;
+        g_MENUManageSelection->loaderCount = 0;
+        g_MENUManageSelection->rosalinaCount = 0;
+        for (u32 i = 0; i < g_MENUManageFileCount; i++)
+        {
+            PluginMenuManageFile *item = &g_MENUManageFiles[i];
+            item->selected = 0;
+            if (!item->bootActive || !PLUGIN_MENU_MakePluginPath(PLUGIN_MENU_ManageName(item)))
+                continue;
+            Handle file = 0;
+            if (R_FAILED(MENU_HOST__FSUSER_OpenFile(&file, buildSelectionArchive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUScanPath), FS_OPEN_READ, 0)))
+                continue;
+            u32 offset = 0;
+            for (;;)
+            {
+                PluginMenu3nxHeader header;
+                u32 metadataOffset;
+                u32 nextOffset;
+                if (!PLUGIN_MENU_ReadHeader(file, offset, &header, &metadataOffset, &nextOffset) || (header.magic != MENU_PLUGIN_MAGIC && header.magic != LOADER_PLUGIN_MAGIC))
+                    break;
+                PluginMenuManageWinner *winners = (header.magic == LOADER_PLUGIN_MAGIC) ? (g_MENUManageSelection->loader) : (g_MENUManageSelection->rosalina);
+                u32 *count = (header.magic == LOADER_PLUGIN_MAGIC) ? (&g_MENUManageSelection->loaderCount) : (&g_MENUManageSelection->rosalinaCount);
+                if (*count < MENU_SYSPLUGIN_MAX_PLUGINS && !PLUGIN_MENU_ManageFindWinner(header.magic, header.pluginId))
+                {
+                    PluginMenuManageWinner *winner = &winners[*count];
+                    winner->magic = header.magic;
+                    winner->pluginId = header.pluginId;
+                    winner->nameOffset = item->nameOffset;
+                    winner->reserved = 0;
+                    winner->fileOffset = offset;
+                    (*count)++;
+                    item->selected = 1;
+                    if (g_MENUManageCapturingBoot && header.magic == MENU_PLUGIN_MAGIC && header.pluginId == MENU_PLUGIN_ID)
+                    {
+                        g_MENUBootSelf.found = true;
+                        g_MENUBootSelf.entryOffset = offset;
+                        g_MENUBootSelf.metadataOffset = metadataOffset;
+                        g_MENUBootSelf.metadataSize = header.metadataSize;
+                        g_MENUBootSelf.expectedEnvLo = header.expectedEnvLo;
+                        g_MENUBootSelf.expectedEnvHi = header.expectedEnvHi;
+                    }
+                }
+                offset = nextOffset;
+            }
 
+            MENU_HOST__FSFILE_Close(file);
+        }
+
+        buildSelectionDone:;
+
+    }
     for (u32 i = 0; i < g_MENUManageFileCount; i++)
     {
         PluginMenuManageFile *item = &g_MENUManageFiles[i];
         const char *name = PLUGIN_MENU_ManageName(item);
         char change = PLUGIN_MENU_ManageFindChange(name, item->currentDisabled, NULL, NULL);
-
         if (item->bootActive)
         {
             if (item->currentDisabled && change == 'E')
-                item->group = 2u; // active now, disabled next boot
+                item->group = 2u;
             else
-                item->group = item->selected ? 0u : 1u;
+                item->group = (item->selected) ? (0u) : (1u);
         }
         else
         {
-            item->group = item->currentDisabled ? 4u : 3u;
+            // active now, disabled next boot
+            item->group = (item->currentDisabled) ? (4u) : (3u);
+        }
+        if (!item->currentDisabled)
+        {
+            enabledCount++;
+            enabledNameOffset = item->nameOffset;
         }
     }
 
+    // use the selected MENU components, whatever the stack was named
+    PluginMenuManageWinner *menuLoader = PLUGIN_MENU_ManageFindWinner(LOADER_PLUGIN_MAGIC, MENU_PLUGIN_ID);
+    PluginMenuManageWinner *menuRosalina = PLUGIN_MENU_ManageFindWinner(MENU_PLUGIN_MAGIC, MENU_PLUGIN_ID);
+    g_MENUManageShowInstallHint = g_MENUManageFileCount &&
+        (!enabledCount || (enabledCount == 1u && menuLoader && menuRosalina &&
+         menuLoader->nameOffset == enabledNameOffset && menuRosalina->nameOffset == enabledNameOffset &&
+         g_MENUManageSelection->loaderCount == 1u && g_MENUManageSelection->rosalinaCount == 1u));
+
     PLUGIN_MENU_ManageSort(true);
-    while (g_MENUManageActiveCount < g_MENUManageFileCount &&
-           g_MENUManageFiles[g_MENUManageActiveCount].group < 3u)
+    while (g_MENUManageActiveCount < g_MENUManageFileCount && g_MENUManageFiles[g_MENUManageActiveCount].group < 3u)
         g_MENUManageActiveCount++;
 
-done:
+    done:
     if (directory)
         MENU_HOST__FSDIR_Close(directory);
+
     if (archive)
         MENU_HOST__FSUSER_CloseArchive(archive);
     return scanComplete;
 }
 
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageSaveBootSnapshot(void)
-{
-    u32 size = 0;
-
-    for (u32 i = 0; i < g_MENUManageFileCount; i++)
-    {
-        PluginMenuManageFile *item = &g_MENUManageFiles[i];
-        const char *name;
-        u32 length;
-        if (item->currentDisabled)
-            continue;
-        name = PLUGIN_MENU_ManageName(item);
-        length = PLUGIN_MENU_StringLength(name);
-        if (size + length + 1u > MENU_MANAGE_TEMP_BYTES)
-            return false;
-        for (u32 j = 0; j < length; j++)
-            g_MENUManageChanges[size++] = name[j];
-        g_MENUManageChanges[size++] = '\n';
-    }
-
-    g_MENUManageChangeSize = size;
-    return PLUGIN_MENU_ManageSaveChanges();
-}
-
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_ManageCaptureBootSnapshot(void)
-{
-    g_MENUBootSelf.found = false;
-    g_MENUBootSelf.entryOffset = 0;
-    g_MENUBootSelf.metadataOffset = 0;
-    g_MENUBootSelf.metadataSize = 0;
-    g_MENUBootSelf.expectedEnvLo = 0;
-    g_MENUBootSelf.expectedEnvHi = 0;
-
-    if (!PLUGIN_MENU_ManageAllocScratch())
-        return;
-
-    g_MENUManageCapturingBoot = true;
-    g_MENUManageChangeSize = 0;
-    if (!PLUGIN_MENU_ManageBuildList() || !PLUGIN_MENU_ManageSaveBootSnapshot())
-        (void)PLUGIN_MENU_ManageSaveExact(NULL, 0);
-    g_MENUManageCapturingBoot = false;
-    PLUGIN_MENU_ManageFreeScratch();
-}
-
 PLUGIN_CODE(MENU) static u32 PLUGIN_MENU_ManageRowForFile(u32 fileIndex)
 {
-    return fileIndex < g_MENUManageActiveCount ? fileIndex + 1u : fileIndex + 3u;
+    return fileIndex < g_MENUManageActiveCount ? fileIndex + 1u :
+        fileIndex + 3u + (g_MENUManageShowInstallHint ? MENU_MANAGE_INSTALL_HINT_ROWS : 0u);
 }
 
 PLUGIN_CODE(MENU) static u32 PLUGIN_MENU_ManageTotalRows(void)
 {
     return g_MENUManageFileCount + 1u +
+           (g_MENUManageShowInstallHint ? MENU_MANAGE_INSTALL_HINT_ROWS : 0u) +
            (g_MENUManageActiveCount < g_MENUManageFileCount ? 2u : 0u);
 }
 
@@ -1148,49 +1096,6 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_ManageDrawFile(
     if (selected)
         MENU_HOST__Draw_DrawString(12, y, MENU_MANAGE_CURSOR_COLOR, g_MENUManageCursor);
     MENU_HOST__Draw_DrawString(24, y, PLUGIN_MENU_ManageColor(item), PLUGIN_MENU_ManageName(item));
-}
-
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_ManageDraw(u32 first, u32 selectedFile)
-{
-    u32 total = PLUGIN_MENU_ManageTotalRows();
-    u32 selectedRow = g_MENUManageFileCount ? PLUGIN_MENU_ManageRowForFile(selectedFile) : 0xFFFFFFFFu;
-    bool hasDisabled = g_MENUManageActiveCount < g_MENUManageFileCount;
-
-    MENU_HOST__Draw_Lock();
-    MENU_HOST__Draw_ClearFramebuffer();
-    PLUGIN_MENU_DrawFrame(g_MENUManageTitle);
-
-    if (first)
-        MENU_HOST__Draw_DrawString(24, MENU_TOP_DOTS_Y, COLOR_GRAY, g_MENUDots);
-
-    for (u32 i = 0; i < MENU_MANAGE_VISIBLE_ROWS && first + i < total; i++)
-    {
-        u32 row = first + i;
-        u32 y = MENU_ITEM_TOP_Y + i * MENU_ITEM_SPACING_Y;
-        if (row == 0u)
-            MENU_HOST__Draw_DrawString(20, y, MENU_MANAGE_ACTIVE_COLOR, g_MENUManageActive);
-        else if (hasDisabled && row == g_MENUManageActiveCount + 1u)
-            ;
-        else if (hasDisabled && row == g_MENUManageActiveCount + 2u)
-            MENU_HOST__Draw_DrawString(20, y, MENU_MANAGE_DISABLED_LABEL_COLOR, g_MENUManageDisabled);
-        else
-        {
-            u32 fileIndex = row <= g_MENUManageActiveCount ? row - 1u : row - 3u;
-            if (fileIndex < g_MENUManageFileCount)
-                PLUGIN_MENU_ManageDrawFile(&g_MENUManageFiles[fileIndex], y + MENU_MANAGE_SECTION_ITEM_Y_OFFSET, row == selectedRow);
-        }
-    }
-
-    if (first + MENU_MANAGE_VISIBLE_ROWS < total)
-        MENU_HOST__Draw_DrawString(24, MENU_ITEM_TOP_Y + MENU_MANAGE_VISIBLE_ROWS * MENU_ITEM_SPACING_Y,
-                                  COLOR_GRAY, g_MENUDots);
-    if (!g_MENUManageFileCount)
-        MENU_HOST__Draw_DrawString(35, 67, COLOR_GRAY, g_MENUManageEmptyText);
-    else
-        MENU_HOST__Draw_DrawString(24, MENU_MANAGE_PROMPT_Y, COLOR_GRAY, g_MENUManageActionsPrompt);
-
-    MENU_HOST__Draw_FlushFramebuffer();
-    MENU_HOST__Draw_Unlock();
 }
 
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_ManageRedrawSelection(
@@ -1236,37 +1141,6 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_ManageRedrawChoice(
     MENU_HOST__Draw_Unlock();
 }
 
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageConfirm(void)
-{
-    u32 selected = 0;
-    MENU_HOST__Draw_Lock();
-    MENU_HOST__Draw_ClearFramebuffer();
-    PLUGIN_MENU_DrawFrame(g_MENUManageConfirmTitle);
-    PLUGIN_MENU_ManageDrawChoice(55u, true, g_MENUManageNo);
-    PLUGIN_MENU_ManageDrawChoice(70u, false, g_MENUManageYes);
-    MENU_HOST__Draw_FlushFramebuffer();
-    MENU_HOST__Draw_Unlock();
-
-    for (;;)
-    {
-        u32 pressed = MENU_HOST__waitInput();
-        if (MENU_HOST__menuShouldExit || (pressed & KEY_B))
-            return false;
-        if (pressed & (KEY_UP | KEY_DOWN))
-        {
-            u32 oldSelected = selected;
-            selected ^= 1u;
-            PLUGIN_MENU_ManageRedrawChoice(
-                oldSelected ? 70u : 55u,
-                oldSelected ? g_MENUManageYes : g_MENUManageNo,
-                selected ? 70u : 55u,
-                selected ? g_MENUManageYes : g_MENUManageNo);
-        }
-        else if (pressed & KEY_A)
-            return selected == 1u;
-    }
-}
-
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_ManageDrawFailure(void)
 {
     MENU_HOST__Draw_Lock();
@@ -1298,391 +1172,91 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_ManageIdText(char out[5], u32 id)
     out[4] = 0;
 }
 
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageAddMissing(u32 componentId, u32 providerId)
-{
-    if (!g_MENUManageActionInfo)
-        return false;
-    for (u32 i = 0; i < g_MENUManageActionInfo->missingCount; i++)
-    {
-        PluginMenuManageMissing *missing = &g_MENUManageActionInfo->missing[i];
-        if (missing->componentId == componentId && missing->providerId == providerId)
-            return true;
-    }
-    if (g_MENUManageActionInfo->missingCount >= MENU_MANAGE_MAX_MISSING)
-        return false;
-    PluginMenuManageMissing *missing =
-        &g_MENUManageActionInfo->missing[g_MENUManageActionInfo->missingCount++];
-    missing->componentId = componentId;
-    missing->providerId = providerId;
-    return true;
-}
-
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageScanRepairProviders(
-    Handle file,
-    u32 fileOffset,
-    const PluginMenu3nxHeader *header
-)
-{
-    u32 repairStart;
-    u32 repairEnd;
-    u32 cursor;
-    u32 exportStart;
-    u32 exportCount;
-    u32 exportBytes;
-
-    if (!header->repairSize)
-        return true;
-
-    if (!PLUGIN_MENU_Add32(fileOffset, MENU_HEADER_SIZE, &repairStart) ||
-        !PLUGIN_MENU_Add32(repairStart, header->fastRelocSize, &repairStart) ||
-        !PLUGIN_MENU_Add32(repairStart, header->codeSize, &repairStart) ||
-        !PLUGIN_MENU_Add32(repairStart, header->dataSize, &repairStart) ||
-        !PLUGIN_MENU_Add32(repairStart, header->repairSize, &repairEnd) ||
-        header->repairSize < sizeof(u32) ||
-        !PLUGIN_MENU_ReadExact(file, repairStart, &exportCount, sizeof(exportCount)) ||
-        exportCount > (header->repairSize - sizeof(u32)) / sizeof(PluginMenuManageExportRecord))
-    {
-        return false;
-    }
-
-    exportBytes = exportCount * sizeof(PluginMenuManageExportRecord);
-    if (!PLUGIN_MENU_Add32(repairStart, sizeof(u32), &exportStart) ||
-        !PLUGIN_MENU_Add32(exportStart, exportBytes, &cursor) || cursor > repairEnd)
-        return false;
-
-    while (cursor < repairEnd)
-    {
-        PluginMenuManageRepairGroup group;
-        u32 recordsBytes;
-        if (repairEnd - cursor < sizeof(group) ||
-            !PLUGIN_MENU_ReadExact(file, cursor, &group, sizeof(group)))
-        {
-            return false;
-        }
-        cursor += sizeof(group);
-        if (group.count > (repairEnd - cursor) / sizeof(PluginMenuManageRepairRecord))
-            return false;
-        recordsBytes = group.count * sizeof(PluginMenuManageRepairRecord);
-
-        if (group.count && group.providerId &&
-            !PLUGIN_MENU_ManageFindWinner(header->magic, group.providerId) &&
-            !PLUGIN_MENU_ManageAddMissing(header->pluginId, group.providerId))
-        {
-            return false;
-        }
-        cursor += recordsBytes;
-    }
-    return cursor == repairEnd;
-}
-
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageScanActionInfo(u32 fileIndex)
-{
-    FS_Archive archive = 0;
-    Handle file = 0;
-    PluginMenuManageFile *item;
-    bool success = false;
-
-    if (fileIndex >= g_MENUManageFileCount || !g_MENUManageActionInfo)
-        return false;
-    item = &g_MENUManageFiles[fileIndex];
-    g_MENUManageActionInfo->componentCount = 0;
-    g_MENUManageActionInfo->missingCount = 0;
-    g_MENUManageActionInfo->selectedComponentCount = 0;
-    g_MENUManageActionInfo->selectedMenuCount = 0;
-
-    if (!PLUGIN_MENU_MakePluginPath(PLUGIN_MENU_ManageName(item)) ||
-        R_FAILED(MENU_HOST__FSUSER_OpenArchive(
-            &archive,
-            ARCHIVE_SDMC,
-            MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))) ||
-        R_FAILED(MENU_HOST__FSUSER_OpenFile(
-            &file,
-            archive,
-            MENU_HOST__fsMakePath(PATH_ASCII, g_MENUScanPath),
-            FS_OPEN_READ,
-            0)))
-    {
-        goto done;
-    }
-
-    for (u32 offset = 0;;)
-    {
-        PluginMenu3nxHeader header;
-        u32 metadataOffset;
-        u32 nextOffset;
-        if (!PLUGIN_MENU_ReadHeader(file, offset, &header, &metadataOffset, &nextOffset) ||
-            (header.magic != MENU_PLUGIN_MAGIC && header.magic != LOADER_PLUGIN_MAGIC))
-            break;
-
-        if (g_MENUManageActionInfo->componentCount >= MENU_MANAGE_MAX_COMPONENTS)
-            goto done;
-        u32 componentIndex = g_MENUManageActionInfo->componentCount++;
-        g_MENUManageActionInfo->componentIds[componentIndex] = header.pluginId;
-        g_MENUManageActionInfo->componentModules[componentIndex] =
-            header.magic == LOADER_PLUGIN_MAGIC ? 'L' : 'R';
-
-        if (PLUGIN_MENU_ManageWinnerMatches(
-                header.magic,
-                header.pluginId,
-                item->nameOffset,
-                offset))
-        {
-            g_MENUManageActionInfo->selectedComponentCount++;
-            if (header.magic == MENU_PLUGIN_MAGIC && header.pluginId == MENU_PLUGIN_ID)
-                g_MENUManageActionInfo->selectedMenuCount++;
-        }
-
-        if (!PLUGIN_MENU_ManageScanRepairProviders(file, offset, &header))
-            goto done;
-        offset = nextOffset;
-    }
-
-    success = g_MENUManageActionInfo->componentCount != 0u;
-
-done:
-    if (file)
-        MENU_HOST__FSFILE_Close(file);
-    if (archive)
-        MENU_HOST__FSUSER_CloseArchive(archive);
-    return success;
-}
-
-PLUGIN_CODE(MENU) static u32 PLUGIN_MENU_ManageDrawContains(u32 y)
-{
-    char list[MENU_MANAGE_MAX_COMPONENTS * 10u + 1u];
-    u32 length = 0;
-
-    list[0] = 0;
-    for (u32 i = 0; i < g_MENUManageActionInfo->componentCount; i++)
-    {
-        char id[5];
-        PLUGIN_MENU_ManageIdText(id, g_MENUManageActionInfo->componentIds[i]);
-        if (i)
-        {
-            list[length++] = ',';
-            list[length++] = ' ';
-        }
-        for (u32 j = 0; j < 4u; j++)
-            list[length++] = id[j];
-        list[length++] = ' ';
-        list[length++] = '(';
-        list[length++] = (char)g_MENUManageActionInfo->componentModules[i];
-        list[length++] = ')';
-    }
-    list[length] = 0;
-
-    MENU_HOST__Draw_DrawString(20, y, COLOR_GRAY, g_MENUManageContains);
-    y += 16u;
-
-    u32 pos = 0;
-    while (pos < length)
-    {
-        u32 take = length - pos;
-        if (take > 32u)
-        {
-            take = 32u;
-            while (take > 1u &&
-                   (list[pos + take] != ' ' || list[pos + take - 1u] != ','))
-                take--;
-            if (take <= 1u)
-                take = 32u;
-        }
-        char saved = list[pos + take];
-        list[pos + take] = 0;
-        MENU_HOST__Draw_DrawString(24, y, COLOR_WHITE, &list[pos]);
-        list[pos + take] = saved;
-        pos += take;
-        while (pos < length && list[pos] == ' ')
-            pos++;
-        y += MENU_ITEM_SPACING_Y;
-    }
-    return y;
-}
-
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_ManageDrawWarnings(void)
-{
-    bool menuDanger = g_MENUManageActionInfo->selectedComponentCount == 1u &&
-                      g_MENUManageActionInfo->selectedMenuCount == 1u;
-    u32 messageLines = g_MENUManageActionInfo->missingCount + (menuDanger ? 3u : 0u);
-    if (!messageLines)
-        return;
-
-    u32 y = MENU_MANAGE_DETAIL_BOTTOM_Y - 16u - (messageLines - 1u) * MENU_ITEM_SPACING_Y;
-    MENU_HOST__Draw_DrawString(20, y, MENU_MANAGE_DISABLED_LABEL_COLOR, g_MENUManageWarning);
-    y += 16u;
-
-    for (u32 i = 0; i < g_MENUManageActionInfo->missingCount; i++)
-    {
-        char line[32];
-        char component[5];
-        char provider[5];
-        u32 pos = 0;
-        PLUGIN_MENU_ManageIdText(component, g_MENUManageActionInfo->missing[i].componentId);
-        PLUGIN_MENU_ManageIdText(provider, g_MENUManageActionInfo->missing[i].providerId);
-        for (u32 j = 0; g_MENUManageMissingPrefix[j] && pos + 1u < sizeof(line); j++)
-            line[pos++] = g_MENUManageMissingPrefix[j];
-        for (u32 j = 0; j < 4u && pos + 1u < sizeof(line); j++)
-            line[pos++] = component[j];
-        for (u32 j = 0; g_MENUManageMissingMiddle[j] && pos + 1u < sizeof(line); j++)
-            line[pos++] = g_MENUManageMissingMiddle[j];
-        for (u32 j = 0; j < 4u && pos + 1u < sizeof(line); j++)
-            line[pos++] = provider[j];
-        line[pos] = 0;
-        MENU_HOST__Draw_DrawString(24, y, COLOR_WHITE, line);
-        y += MENU_ITEM_SPACING_Y;
-    }
-
-    if (menuDanger)
-    {
-        MENU_HOST__Draw_DrawString(24, y, COLOR_WHITE, g_MENUManageDanger1);
-        y += MENU_ITEM_SPACING_Y;
-        MENU_HOST__Draw_DrawString(24, y, COLOR_WHITE, g_MENUManageDanger2);
-        y += MENU_ITEM_SPACING_Y;
-        MENU_HOST__Draw_DrawString(24, y, COLOR_WHITE, g_MENUManageDanger3);
-    }
-}
-
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_ManageDrawActionsPage(
-    const PluginMenuManageFile *item,
-    const char *firstAction,
-    u32 selected
-)
-{
-    MENU_HOST__Draw_Lock();
-    MENU_HOST__Draw_ClearFramebuffer();
-    PLUGIN_MENU_DrawFrame(g_MENUManageTitle);
-    u32 titleColor = PLUGIN_MENU_ManageColor(item);
-    if (titleColor == COLOR_WHITE)
-        titleColor = MENU_MANAGE_ACTIVE_COLOR;
-    MENU_HOST__Draw_DrawString(20, 42, titleColor, PLUGIN_MENU_ManageName(item));
-    PLUGIN_MENU_ManageDrawChoice(60u, selected == 0u, firstAction);
-    PLUGIN_MENU_ManageDrawChoice(75u, selected == 1u, g_MENUManageDelete);
-    (void)PLUGIN_MENU_ManageDrawContains(96u);
-    PLUGIN_MENU_ManageDrawWarnings();
-    MENU_HOST__Draw_FlushFramebuffer();
-    MENU_HOST__Draw_Unlock();
-}
-
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageRename(PluginMenuManageFile *item)
-{
-    const char *name = PLUGIN_MENU_ManageName(item);
-    bool success = item->currentDisabled ?
-        PLUGIN_MENU_EnableSysplugin(name) :
-        PLUGIN_MENU_DisableSysplugin(name);
-    if (success)
-        PLUGIN_MENU_ManageLoadChanges();
-    return success;
-}
-
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageDeleteFile(PluginMenuManageFile *item)
-{
-    bool success = PLUGIN_MENU_DeleteSysplugin(PLUGIN_MENU_ManageName(item));
-    if (success)
-        PLUGIN_MENU_ManageLoadChanges();
-    return success;
-}
-
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ManageActions(u32 fileIndex)
-{
-    if (fileIndex >= g_MENUManageFileCount)
-        return false;
-
-    PluginMenuManageFile *item = &g_MENUManageFiles[fileIndex];
-    const char *firstAction = item->currentDisabled ? g_MENUManageEnable : g_MENUManageDisable;
-    u32 selected = 0;
-    bool redraw = true;
-
-    PLUGIN_MENU_ManageDrawScanning();
-    if (!PLUGIN_MENU_ManageScanActionInfo(fileIndex))
-    {
-        PLUGIN_MENU_ManageDrawFailure();
-        return false;
-    }
-
-    for (;;)
-    {
-        if (redraw)
-        {
-            PLUGIN_MENU_ManageDrawActionsPage(item, firstAction, selected);
-            redraw = false;
-        }
-
-        u32 pressed = MENU_HOST__waitInput();
-        if (MENU_HOST__menuShouldExit || (pressed & KEY_B))
-            return false;
-        if (pressed & (KEY_UP | KEY_DOWN))
-        {
-            u32 oldSelected = selected;
-            selected ^= 1u;
-            PLUGIN_MENU_ManageRedrawChoice(
-                oldSelected ? 75u : 60u,
-                oldSelected ? g_MENUManageDelete : firstAction,
-                selected ? 75u : 60u,
-                selected ? g_MENUManageDelete : firstAction);
-        }
-        else if (pressed & KEY_A)
-        {
-            if (!PLUGIN_MENU_ManageConfirm())
-            {
-                redraw = true;
-                continue;
-            }
-            bool success = selected == 0u ?
-                PLUGIN_MENU_ManageRename(item) : PLUGIN_MENU_ManageDeleteFile(item);
-            if (!success)
-            {
-                PLUGIN_MENU_ManageDrawFailure();
-                return false;
-            }
-            return true;
-        }
-    }
-}
-
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_Manage(void)
 {
     u32 selected = 0;
     u32 first = 0;
     bool redraw = true;
-
     PLUGIN_MENU_ManageDrawScanning();
     if (!PLUGIN_MENU_ManageAllocScratch())
     {
         PLUGIN_MENU_ManageDrawFailure();
         return;
     }
-
     PLUGIN_MENU_ManageLoadChanges();
     PLUGIN_MENU_ManageBuildList();
-
     for (;;)
     {
         if (MENU_HOST__menuShouldExit)
             break;
         if (selected >= g_MENUManageFileCount && g_MENUManageFileCount)
             selected = g_MENUManageFileCount - 1u;
-
         if (g_MENUManageFileCount)
             first = PLUGIN_MENU_ManageAdjustFirst(first, PLUGIN_MENU_ManageRowForFile(selected));
         else
             first = 0;
         if (redraw)
         {
-            PLUGIN_MENU_ManageDraw(first, selected);
+            {
+                u32 total = PLUGIN_MENU_ManageTotalRows();
+                u32 selectedRow = (g_MENUManageFileCount) ? (PLUGIN_MENU_ManageRowForFile(selected)) : (0xFFFFFFFFu);
+                bool hasDisabled = g_MENUManageActiveCount < g_MENUManageFileCount;
+                u32 hintRows = g_MENUManageShowInstallHint ? MENU_MANAGE_INSTALL_HINT_ROWS : 0u;
+                u32 hintStart = g_MENUManageActiveCount + 1u;
+                u32 disabledStart = hintStart + hintRows;
+                MENU_HOST__Draw_Lock();
+                MENU_HOST__Draw_ClearFramebuffer();
+                PLUGIN_MENU_DrawFrame(g_MENUManageTitle);
+                if (first)
+                    MENU_HOST__Draw_DrawString(24, MENU_TOP_DOTS_Y, COLOR_GRAY, g_MENUDots);
+                for (u32 i = 0; i < MENU_MANAGE_VISIBLE_ROWS && (first + i) < total; i++)
+                {
+                    u32 row = first + i;
+                    u32 y = MENU_ITEM_TOP_Y + i * MENU_ITEM_SPACING_Y;
+                    if (row == 0u)
+                        MENU_HOST__Draw_DrawString(20, y, MENU_MANAGE_ACTIVE_COLOR, g_MENUManageActive);
+                    else if (hintRows && row >= hintStart && row < disabledStart)
+                    {
+                        const char *text = row == hintStart ? g_MENUManageInstallHint1 :
+                            row == hintStart + 1u ? g_MENUManageInstallHint2 : g_MENUManageInstallHint3;
+                        MENU_HOST__Draw_DrawString(35, y + MENU_MANAGE_SECTION_ITEM_Y_OFFSET, COLOR_GRAY, text);
+                    }
+                    else if (hasDisabled && row == disabledStart)
+                        ;
+                    else if (hasDisabled && row == disabledStart + 1u)
+                        MENU_HOST__Draw_DrawString(20, y, MENU_MANAGE_DISABLED_LABEL_COLOR, g_MENUManageDisabled);
+                    else
+                    {
+                        u32 fileIndex = (row <= g_MENUManageActiveCount) ? (row - 1u) : (row - 3u - hintRows);
+                        if (fileIndex < g_MENUManageFileCount)
+                            PLUGIN_MENU_ManageDrawFile(&g_MENUManageFiles[fileIndex], y + MENU_MANAGE_SECTION_ITEM_Y_OFFSET, row == selectedRow);
+                    }
+                }
+
+                if ((first + MENU_MANAGE_VISIBLE_ROWS) < total)
+                    MENU_HOST__Draw_DrawString(24, MENU_ITEM_TOP_Y + MENU_MANAGE_VISIBLE_ROWS * MENU_ITEM_SPACING_Y, COLOR_GRAY, g_MENUDots);
+                if (!g_MENUManageFileCount)
+                {
+                    MENU_HOST__Draw_DrawString(35, 67, COLOR_GRAY, g_MENUManageEmptyText);
+                    MENU_HOST__Draw_DrawString(35, 89, COLOR_GRAY, g_MENUEmptyText);
+                }
+                else
+                    MENU_HOST__Draw_DrawString(24, MENU_MANAGE_PROMPT_Y, COLOR_GRAY, g_MENUManageActionsPrompt);
+                MENU_HOST__Draw_FlushFramebuffer();
+                MENU_HOST__Draw_Unlock();
+            }
             redraw = false;
         }
-
         u32 pressed = MENU_HOST__waitInput();
-        if (MENU_HOST__menuShouldExit || (pressed & KEY_B))
+        if (MENU_HOST__menuShouldExit || pressed & KEY_B)
             break;
         if (!g_MENUManageFileCount)
             continue;
-
         if (pressed & KEY_DOWN)
         {
             u32 oldSelected = selected;
             u32 oldFirst = first;
-            selected = selected + 1u < g_MENUManageFileCount ? selected + 1u : 0u;
+            selected = ((selected + 1u) < g_MENUManageFileCount) ? (selected + 1u) : (0u);
             first = PLUGIN_MENU_ManageAdjustFirst(first, PLUGIN_MENU_ManageRowForFile(selected));
             if (first != oldFirst)
                 redraw = true;
@@ -1693,7 +1267,7 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_Manage(void)
         {
             u32 oldSelected = selected;
             u32 oldFirst = first;
-            selected = selected ? selected - 1u : g_MENUManageFileCount - 1u;
+            selected = (selected) ? (selected - 1u) : (g_MENUManageFileCount - 1u);
             first = PLUGIN_MENU_ManageAdjustFirst(first, PLUGIN_MENU_ManageRowForFile(selected));
             if (first != oldFirst)
                 redraw = true;
@@ -1702,7 +1276,403 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_Manage(void)
         }
         else if (pressed & KEY_X)
         {
-            bool changed = PLUGIN_MENU_ManageActions(selected);
+            bool changed;
+            {
+                u32 manageActionsFileIndex = selected;
+                if (manageActionsFileIndex >= g_MENUManageFileCount)
+                {
+                    changed = false;
+                    goto manageActionsDone;
+                }
+                PluginMenuManageFile *item = &g_MENUManageFiles[manageActionsFileIndex];
+                const char *firstAction = (item->currentDisabled) ? (g_MENUManageEnable) : (g_MENUManageDisable);
+                u32 selected = 0;
+                bool redraw = true;
+                PLUGIN_MENU_ManageDrawScanning();
+                bool actionInfoResult;
+                {
+                    u32 actionInfoFileIndex = manageActionsFileIndex;
+                    FS_Archive archive = 0;
+                    Handle file = 0;
+                    PluginMenuManageFile *item;
+                    bool success = false;
+                    if (actionInfoFileIndex >= g_MENUManageFileCount || !g_MENUManageActionInfo)
+                    {
+                        actionInfoResult = false;
+                        goto actionInfoDone2;
+                    }
+                    item = &g_MENUManageFiles[actionInfoFileIndex];
+                    g_MENUManageActionInfo->componentCount = 0;
+                    g_MENUManageActionInfo->missingCount = 0;
+                    g_MENUManageActionInfo->selectedComponentCount = 0;
+                    g_MENUManageActionInfo->selectedMenuCount = 0;
+                    if (!PLUGIN_MENU_MakePluginPath(PLUGIN_MENU_ManageName(item)) || R_FAILED(MENU_HOST__FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))) || R_FAILED(MENU_HOST__FSUSER_OpenFile(&file, archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUScanPath), FS_OPEN_READ, 0)))
+                    {
+                        goto actionInfoDone;
+                    }
+                    for (u32 offset = 0;;)
+                    {
+                        PluginMenu3nxHeader header;
+                        u32 metadataOffset;
+                        u32 nextOffset;
+                        if (!PLUGIN_MENU_ReadHeader(file, offset, &header, &metadataOffset, &nextOffset) || (header.magic != MENU_PLUGIN_MAGIC && header.magic != LOADER_PLUGIN_MAGIC))
+                            break;
+                        if (g_MENUManageActionInfo->componentCount >= MENU_MANAGE_MAX_COMPONENTS)
+                            goto actionInfoDone;
+                        u32 componentIndex = g_MENUManageActionInfo->componentCount++;
+                        g_MENUManageActionInfo->componentIds[componentIndex] = header.pluginId;
+                        g_MENUManageActionInfo->componentModules[componentIndex] = (header.magic == LOADER_PLUGIN_MAGIC) ? ('L') : ('R');
+                        bool winnerMatchesResult;
+                        {
+                            u32 winnerMatchesMagic = header.magic;
+                            u32 winnerMatchesPluginId = header.pluginId;
+                            u16 winnerMatchesNameOffset = item->nameOffset;
+                            u32 winnerMatchesFileOffset = offset;
+                            PluginMenuManageWinner *winner = PLUGIN_MENU_ManageFindWinner(winnerMatchesMagic, winnerMatchesPluginId);
+                            winnerMatchesResult = winner && winner->nameOffset == winnerMatchesNameOffset && winner->fileOffset == winnerMatchesFileOffset;
+                        }
+                        if (winnerMatchesResult)
+                        {
+                            g_MENUManageActionInfo->selectedComponentCount++;
+                            if (header.magic == MENU_PLUGIN_MAGIC && header.pluginId == MENU_PLUGIN_ID)
+                                g_MENUManageActionInfo->selectedMenuCount++;
+                        }
+                        bool repairProvidersResult;
+                        {
+                            Handle repairProvidersFile = file;
+                            u32 repairProvidersFileOffset = offset;
+                            u32 repairStart;
+                            u32 repairEnd;
+                            u32 cursor;
+                            u32 exportStart;
+                            u32 exportCount;
+                            u32 exportBytes;
+                            if (!header.repairSize)
+                            {
+                                repairProvidersResult = true;
+                                goto repairProvidersDone;
+                            }
+                            if (!PLUGIN_MENU_Add32(repairProvidersFileOffset, MENU_HEADER_SIZE, &repairStart) || !PLUGIN_MENU_Add32(repairStart, header.fastRelocSize, &repairStart) || !PLUGIN_MENU_Add32(repairStart, header.codeSize, &repairStart) || !PLUGIN_MENU_Add32(repairStart, header.dataSize, &repairStart) || !PLUGIN_MENU_Add32(repairStart, header.repairSize, &repairEnd) || header.repairSize < sizeof(u32) || !PLUGIN_MENU_ReadExact(repairProvidersFile, repairStart, &exportCount, sizeof(exportCount)) || exportCount > ((header.repairSize - sizeof(u32)) / sizeof(PluginMenuManageExportRecord)))
+                            {
+                                {
+                                    repairProvidersResult = false;
+                                    goto repairProvidersDone;
+                                }
+                            }
+                            exportBytes = exportCount * sizeof(PluginMenuManageExportRecord);
+                            if (!PLUGIN_MENU_Add32(repairStart, sizeof(u32), &exportStart) || !PLUGIN_MENU_Add32(exportStart, exportBytes, &cursor) || cursor > repairEnd)
+                            {
+                                repairProvidersResult = false;
+                                goto repairProvidersDone;
+                            }
+                            while (cursor < repairEnd)
+                            {
+                                PluginMenuManageRepairGroup group;
+                                u32 recordsBytes;
+                                if ((repairEnd - cursor) < sizeof(group) || !PLUGIN_MENU_ReadExact(repairProvidersFile, cursor, &group, sizeof(group)))
+                                {
+                                    {
+                                        repairProvidersResult = false;
+                                        goto repairProvidersDone;
+                                    }
+                                }
+                                cursor += sizeof(group);
+                                if (group.count > ((repairEnd - cursor) / sizeof(PluginMenuManageRepairRecord)))
+                                {
+                                    repairProvidersResult = false;
+                                    goto repairProvidersDone;
+                                }
+                                recordsBytes = group.count * sizeof(PluginMenuManageRepairRecord);
+                                bool addMissingCondition = (group.count && group.providerId && !PLUGIN_MENU_ManageFindWinner(header.magic, group.providerId)) != 0;
+                                if (addMissingCondition)
+                                {
+                                    bool addMissingResult;
+                                    {
+                                        u32 addMissingComponentId = header.pluginId;
+                                        u32 addMissingProviderId = group.providerId;
+                                        if (!g_MENUManageActionInfo)
+                                        {
+                                            addMissingResult = false;
+                                            goto addMissingDone;
+                                        }
+                                        for (u32 i = 0; i < g_MENUManageActionInfo->missingCount; i++)
+                                        {
+                                            PluginMenuManageMissing *missing = &g_MENUManageActionInfo->missing[i];
+                                            if (missing->componentId == addMissingComponentId && missing->providerId == addMissingProviderId)
+                                            {
+                                                addMissingResult = true;
+                                                goto addMissingDone;
+                                            }
+                                        }
+
+                                        if (g_MENUManageActionInfo->missingCount >= MENU_MANAGE_MAX_MISSING)
+                                        {
+                                            addMissingResult = false;
+                                            goto addMissingDone;
+                                        }
+                                        PluginMenuManageMissing *missing = &g_MENUManageActionInfo->missing[g_MENUManageActionInfo->missingCount++];
+                                        missing->componentId = addMissingComponentId;
+                                        missing->providerId = addMissingProviderId;
+                                        addMissingResult = true;
+                                        addMissingDone:;
+
+                                    }
+                                    addMissingCondition = !addMissingResult != 0;
+                                }
+                                if (addMissingCondition)
+                                {
+                                    {
+                                        repairProvidersResult = false;
+                                        goto repairProvidersDone;
+                                    }
+                                }
+                                cursor += recordsBytes;
+                            }
+
+                            repairProvidersResult = cursor == repairEnd;
+                            repairProvidersDone:;
+
+                        }
+                        if (!repairProvidersResult)
+                            goto actionInfoDone;
+                        offset = nextOffset;
+                    }
+
+                    success = g_MENUManageActionInfo->componentCount != 0u;
+                    actionInfoDone:
+                    if (file)
+                        MENU_HOST__FSFILE_Close(file);
+
+                    if (archive)
+                        MENU_HOST__FSUSER_CloseArchive(archive);
+                    actionInfoResult = success;
+                    actionInfoDone2:;
+
+                }
+                if (!actionInfoResult)
+                {
+                    PLUGIN_MENU_ManageDrawFailure();
+                    {
+                        changed = false;
+                        goto manageActionsDone;
+                    }
+                }
+                for (;;)
+                {
+                    if (redraw)
+                    {
+                        {
+                            const PluginMenuManageFile *actionsPageItem = item;
+                            const char *actionsPageFirstAction = firstAction;
+                            MENU_HOST__Draw_Lock();
+                            MENU_HOST__Draw_ClearFramebuffer();
+                            PLUGIN_MENU_DrawFrame(g_MENUManageTitle);
+                            u32 titleColor = PLUGIN_MENU_ManageColor(actionsPageItem);
+                            if (titleColor == COLOR_WHITE)
+                                titleColor = MENU_MANAGE_ACTIVE_COLOR;
+                            MENU_HOST__Draw_DrawString(20, 42, titleColor, PLUGIN_MENU_ManageName(actionsPageItem));
+                            PLUGIN_MENU_ManageDrawChoice(60u, selected == 0u, actionsPageFirstAction);
+                            PLUGIN_MENU_ManageDrawChoice(75u, selected == 1u, g_MENUManageDelete);
+                            u32 drawContainsResult;
+                            {
+                                u32 drawContainsY = 96u;
+                                char list[MENU_MANAGE_MAX_COMPONENTS * 10u + 1u];
+                                u32 length = 0;
+                                list[0] = 0;
+                                for (u32 i = 0; i < g_MENUManageActionInfo->componentCount; i++)
+                                {
+                                    char id[5];
+                                    PLUGIN_MENU_ManageIdText(id, g_MENUManageActionInfo->componentIds[i]);
+                                    if (i)
+                                    {
+                                        list[length++] = ',';
+                                        list[length++] = ' ';
+                                    }
+                                    for (u32 j = 0; j < 4u; j++)
+                                        list[length++] = id[j];
+
+                                    list[length++] = ' ';
+                                    list[length++] = '(';
+                                    list[length++] = (char) g_MENUManageActionInfo->componentModules[i];
+                                    list[length++] = ')';
+                                }
+
+                                list[length] = 0;
+                                MENU_HOST__Draw_DrawString(20, drawContainsY, COLOR_GRAY, g_MENUManageContains);
+                                drawContainsY += 16u;
+                                u32 pos = 0;
+                                while (pos < length)
+                                {
+                                    u32 take = length - pos;
+                                    if (take > 32u)
+                                    {
+                                        take = 32u;
+                                        while (take > 1u && (list[pos + take] != ' ' || list[pos + take - 1u] != ','))
+                                            take--;
+
+                                        if (take <= 1u)
+                                            take = 32u;
+                                    }
+                                    char saved = list[pos + take];
+                                    list[pos + take] = 0;
+                                    MENU_HOST__Draw_DrawString(24, drawContainsY, COLOR_WHITE, &list[pos]);
+                                    list[pos + take] = saved;
+                                    pos += take;
+                                    while (pos < length && list[pos] == ' ')
+                                        pos++;
+
+                                    drawContainsY += MENU_ITEM_SPACING_Y;
+                                }
+
+                                drawContainsResult = drawContainsY;
+                            }
+                            (void) drawContainsResult;
+                            {
+                                bool menuDanger = g_MENUManageActionInfo->selectedComponentCount == 1u && g_MENUManageActionInfo->selectedMenuCount == 1u;
+                                u32 messageLines = g_MENUManageActionInfo->missingCount + ((menuDanger) ? (3u) : (0u));
+                                if (!messageLines)
+                                    goto drawWarningsDone;
+                                u32 y = MENU_MANAGE_DETAIL_BOTTOM_Y - 16u - (messageLines - 1u) * MENU_ITEM_SPACING_Y;
+                                MENU_HOST__Draw_DrawString(20, y, MENU_MANAGE_DISABLED_LABEL_COLOR, g_MENUManageWarning);
+                                y += 16u;
+                                for (u32 i = 0; i < g_MENUManageActionInfo->missingCount; i++)
+                                {
+                                    char line[32];
+                                    char component[5];
+                                    char provider[5];
+                                    u32 pos = 0;
+                                    PLUGIN_MENU_ManageIdText(component, g_MENUManageActionInfo->missing[i].componentId);
+                                    PLUGIN_MENU_ManageIdText(provider, g_MENUManageActionInfo->missing[i].providerId);
+                                    for (u32 j = 0; g_MENUManageMissingPrefix[j] && (pos + 1u) < sizeof(line); j++)
+                                        line[pos++] = g_MENUManageMissingPrefix[j];
+
+                                    for (u32 j = 0; j < 4u && (pos + 1u) < sizeof(line); j++)
+                                        line[pos++] = component[j];
+
+                                    for (u32 j = 0; g_MENUManageMissingMiddle[j] && (pos + 1u) < sizeof(line); j++)
+                                        line[pos++] = g_MENUManageMissingMiddle[j];
+
+                                    for (u32 j = 0; j < 4u && (pos + 1u) < sizeof(line); j++)
+                                        line[pos++] = provider[j];
+
+                                    line[pos] = 0;
+                                    MENU_HOST__Draw_DrawString(24, y, COLOR_WHITE, line);
+                                    y += MENU_ITEM_SPACING_Y;
+                                }
+
+                                if (menuDanger)
+                                {
+                                    MENU_HOST__Draw_DrawString(24, y, COLOR_WHITE, g_MENUManageDanger1);
+                                    y += MENU_ITEM_SPACING_Y;
+                                    MENU_HOST__Draw_DrawString(24, y, COLOR_WHITE, g_MENUManageDanger2);
+                                    y += MENU_ITEM_SPACING_Y;
+                                    MENU_HOST__Draw_DrawString(24, y, COLOR_WHITE, g_MENUManageDanger3);
+                                }
+                                drawWarningsDone:;
+
+                            }
+                            MENU_HOST__Draw_FlushFramebuffer();
+                            MENU_HOST__Draw_Unlock();
+                        }
+                        redraw = false;
+                    }
+                    u32 pressed = MENU_HOST__waitInput();
+                    if (MENU_HOST__menuShouldExit || pressed & KEY_B)
+                    {
+                        changed = false;
+                        goto manageActionsDone;
+                    }
+                    if (pressed & (KEY_UP | KEY_DOWN))
+                    {
+                        u32 oldSelected = selected;
+                        selected ^= 1u;
+                        PLUGIN_MENU_ManageRedrawChoice((oldSelected) ? (75u) : (60u), (oldSelected) ? (g_MENUManageDelete) : (firstAction), (selected) ? (75u) : (60u), (selected) ? (g_MENUManageDelete) : (firstAction));
+                    }
+                    else if (pressed & KEY_A)
+                    {
+                        bool manageConfirmResult;
+                        {
+                            u32 selected = 0;
+                            MENU_HOST__Draw_Lock();
+                            MENU_HOST__Draw_ClearFramebuffer();
+                            PLUGIN_MENU_DrawFrame(g_MENUManageConfirmTitle);
+                            PLUGIN_MENU_ManageDrawChoice(55u, true, g_MENUManageNo);
+                            PLUGIN_MENU_ManageDrawChoice(70u, false, g_MENUManageYes);
+                            MENU_HOST__Draw_FlushFramebuffer();
+                            MENU_HOST__Draw_Unlock();
+                            for (;;)
+                            {
+                                u32 pressed = MENU_HOST__waitInput();
+                                if (MENU_HOST__menuShouldExit || pressed & KEY_B)
+                                {
+                                    manageConfirmResult = false;
+                                    goto manageConfirmDone;
+                                }
+                                if (pressed & (KEY_UP | KEY_DOWN))
+                                {
+                                    u32 oldSelected = selected;
+                                    selected ^= 1u;
+                                    PLUGIN_MENU_ManageRedrawChoice((oldSelected) ? (70u) : (55u), (oldSelected) ? (g_MENUManageYes) : (g_MENUManageNo), (selected) ? (70u) : (55u), (selected) ? (g_MENUManageYes) : (g_MENUManageNo));
+                                }
+                                else if (pressed & KEY_A)
+                                {
+                                    manageConfirmResult = selected == 1u;
+                                    goto manageConfirmDone;
+                                }
+                            }
+
+                            manageConfirmDone:;
+
+                        }
+                        if (!manageConfirmResult)
+                        {
+                            redraw = true;
+                            continue;
+                        }
+                        bool success;
+                        if (selected == 0u)
+                        {
+                            bool manageRenameResult;
+                            {
+                                PluginMenuManageFile *manageRenameItem = item;
+                                const char *name = PLUGIN_MENU_ManageName(manageRenameItem);
+                                bool success = (manageRenameItem->currentDisabled) ? (PLUGIN_MENU_EnableSysplugin(name)) : (PLUGIN_MENU_DisableSysplugin(name));
+                                if (success)
+                                    PLUGIN_MENU_ManageLoadChanges();
+                                manageRenameResult = success;
+                            }
+                            success = manageRenameResult;
+                        }
+                        else
+                        {
+                            bool deleteFileResult;
+                            {
+                                PluginMenuManageFile *deleteFileItem = item;
+                                bool success = PLUGIN_MENU_DeleteSysplugin(PLUGIN_MENU_ManageName(deleteFileItem));
+                                if (success)
+                                    PLUGIN_MENU_ManageLoadChanges();
+                                deleteFileResult = success;
+                            }
+                            success = deleteFileResult;
+                        }
+                        if (!success)
+                        {
+                            PLUGIN_MENU_ManageDrawFailure();
+                            {
+                                changed = false;
+                                goto manageActionsDone;
+                            }
+                        }
+                        {
+                            changed = true;
+                            goto manageActionsDone;
+                        }
+                    }
+                }
+
+                manageActionsDone:;
+
+            }
             if (changed)
             {
                 PLUGIN_MENU_ManageDrawScanning();

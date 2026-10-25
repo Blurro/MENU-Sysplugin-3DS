@@ -124,61 +124,61 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_UnregisterBridgeReceiver(PluginMenuBridgeRegi
     return false;
 }
 
-PLUGIN_CODE(MENU) static u32 PLUGIN_MENU_BridgeDispatch(
-    u32 targetPluginId,
-    u32 command,
-    const void *payload,
-    u32 payloadSize
-)
-{
-    PluginMenuBridgeReceiverCallback callback = NULL;
-    PluginMenuBridgeRegistration *current;
-
-    PLUGIN_MENU_BridgeLock();
-    for (current = g_MENUBridgeFirst; current; current = current->next)
-    {
-        if (current->pluginId == targetPluginId)
-        {
-            callback = current->callback;
-            break;
-        }
-    }
-    PLUGIN_MENU_BridgeUnlock();
-
-    if (!callback)
-        return MENU_BRIDGE_STATUS_RETRY;
-    return callback(command, payload, payloadSize) ?
-        MENU_BRIDGE_STATUS_DELIVERED : MENU_BRIDGE_STATUS_RETRY;
-}
-
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_HandleBridgeCommand(u32 *cmdbuf)
-{
-    u32 payloadSize;
-    u32 payloadWords;
-    u32 status = MENU_BRIDGE_STATUS_DROP;
-
-    if (!cmdbuf || (cmdbuf[0] >> 16) != MENU_BRIDGE_IPC_COMMAND)
-        return false;
-
-    payloadSize = cmdbuf[4];
-    payloadWords = (payloadSize + 3u) >> 2;
-    if (cmdbuf[1] == MENU_BRIDGE_IPC_ABI && cmdbuf[2] != 0 &&
-        payloadSize <= SYSPLUGIN_MENU_BRIDGE_MAX_PAYLOAD &&
-        cmdbuf[0] == IPC_MakeHeader(MENU_BRIDGE_IPC_COMMAND, 4u + payloadWords, 0))
-    {
-        status = PLUGIN_MENU_BridgeDispatch(cmdbuf[2], cmdbuf[3], &cmdbuf[5], payloadSize);
-    }
-
-    cmdbuf[0] = IPC_MakeHeader(MENU_BRIDGE_IPC_COMMAND, 2, 0);
-    cmdbuf[1] = 0;
-    cmdbuf[2] = status;
-    return true;
-}
-
 PLUGIN_CODE(MENU) void PLUGIN_MENU_PluginLoaderCommandsWrapper(void *ctx)
 {
     u32 *cmdbuf = PLUGIN_MENU_BridgeCommandBuffer();
-    if (PLUGIN_MENU_HandleBridgeCommand(cmdbuf))
+    bool bridgeCommandResult;
+    {
+        u32 payloadSize;
+        u32 payloadWords;
+        u32 status = MENU_BRIDGE_STATUS_DROP;
+        if (!cmdbuf || (cmdbuf[0] >> 16) != MENU_BRIDGE_IPC_COMMAND)
+        {
+            bridgeCommandResult = false;
+            goto bridgeCommandDone;
+        }
+        payloadSize = cmdbuf[4];
+        payloadWords = (payloadSize + 3u) >> 2;
+        if (cmdbuf[1] == MENU_BRIDGE_IPC_ABI && cmdbuf[2] != 0 && payloadSize <= SYSPLUGIN_MENU_BRIDGE_MAX_PAYLOAD && cmdbuf[0] == IPC_MakeHeader(MENU_BRIDGE_IPC_COMMAND, 4u + payloadWords, 0))
+        {
+            u32 bridgeDispatchResult;
+            {
+                u32 bridgeDispatchTargetPluginId = cmdbuf[2];
+                u32 bridgeDispatchCommand = cmdbuf[3];
+                const void *bridgeDispatchPayload = &cmdbuf[5];
+                u32 bridgeDispatchPayloadSize = payloadSize;
+                PluginMenuBridgeReceiverCallback callback = NULL;
+                PluginMenuBridgeRegistration *current;
+                PLUGIN_MENU_BridgeLock();
+                for (current = g_MENUBridgeFirst; current; current = current->next)
+                {
+                    if (current->pluginId == bridgeDispatchTargetPluginId)
+                    {
+                        callback = current->callback;
+                        break;
+                    }
+                }
+
+                PLUGIN_MENU_BridgeUnlock();
+                if (!callback)
+                {
+                    bridgeDispatchResult = MENU_BRIDGE_STATUS_RETRY;
+                    goto bridgeDispatchDone;
+                }
+                bridgeDispatchResult = (callback(bridgeDispatchCommand, bridgeDispatchPayload, bridgeDispatchPayloadSize)) ? (MENU_BRIDGE_STATUS_DELIVERED) : (MENU_BRIDGE_STATUS_RETRY);
+                bridgeDispatchDone:;
+
+            }
+            status = bridgeDispatchResult;
+        }
+        cmdbuf[0] = IPC_MakeHeader(MENU_BRIDGE_IPC_COMMAND, 2, 0);
+        cmdbuf[1] = 0;
+        cmdbuf[2] = status;
+        bridgeCommandResult = true;
+        bridgeCommandDone:;
+
+    }
+    if (bridgeCommandResult)
         return;
     PLUGIN_MENU_BridgeHandlerTrampoline(ctx);
 }

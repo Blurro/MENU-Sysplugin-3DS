@@ -16,6 +16,8 @@ Build by overlaying [Stock Nexus3DS](https://github.com/2b-zipper/Nexus3DS/tree/
 ./makeplugin.sh
 ```
 
+`pre_makeplugin.sh` builds the HTTPS helper and the current Online page, `onlinepagetemp.3on`. For standalone Online update payloads, run `./makepluginGIT.sh` after preparation; it produces `menu_l.bin` and `menu_r.bin`.
+
 Then place the built `ModMenu.0.3nx` in:
 
 ```text
@@ -79,7 +81,7 @@ Result PLUGIN_MENU_UnpackLz10File(const PluginMenuFileContext *source, u32 compr
 void PLUGIN_MENU_ClosePluginFile(PluginMenuFileContext *context);
 ```
 
-`OpenPluginFile` locates the selected `.3nx` containing a plugin ID and gives access to its entry/metadata offsets. This lets larger assets live in `.3nx` metadata instead of storing them in permanent memory, or requiring packaging alongside the `.3nx`
+`OpenPluginFile` locates the selected Rosalina `.3nx` entry for a plugin ID and gives access to its entry/metadata offsets. This lets larger assets live in `.3nx` metadata instead of storing them in permanent memory, or requiring packaging alongside the `.3nx`
 
 `ExtractRawFile` copies an uncompressed metadata range with buffered writes. Both extraction helpers yield between chunks and flush only the final write.
 
@@ -118,11 +120,11 @@ void PLUGIN_MENU_UnmapPage(u32 mappedBase);
 
 `FindFreeRange` only searches Rosalina's virtual address space for a suitable free range.
 
-`TempAlloc` uses that free-range search to create ordinary temporary memory with `ControlMemoryUnsafe`, and `TempFree` releases that allocation. Use these for temporary buffers without permanently inflating plugin BSS.
+`TempAlloc` uses that free-range search to create ordinary temporary memory with `ControlMemoryUnsafe`, and `TempFree` releases that allocation. Use these for temporary buffers without permanently inflating plugin BSS. Sizes passed to `FindFreeRange`, `TempAlloc` and `TempFree` must be nonzero multiples of `0x1000`.
 
 `MapPage` and `UnmapPage` are a separate guarded-alias API. `MapPage` handles the full mapping setup itself: it finds space for three pages, allocates a guard page before and after the alias, and maps the requested source page into the middle. Callers do not need to find the alias address or allocate guard pages themselves.
 
-`UnmapPage` removes the middle alias and then frees both guards.
+`UnmapPage` removes the middle alias and frees both guards only if the unmap succeeds.
 
 The guards are required because compatible adjacent `MapProcessMemoryEx` mappings can merge into one kernel region. Unmapping only one page from such a merged region, using UnmapProcessMemoryEx, has a bug where it will remove following pages too.
 
@@ -156,7 +158,7 @@ bool PLUGIN_MENU_BridgeSend(u32 targetPluginId, u32 command, const void *payload
 
 One title registration can list every regional title ID it supports. `prepare` runs after Loader has built the `CodeSetHeader` but before `svcCreateCodeSet`; `processCreated` runs after `svcCreateProcess` succeeds; `loaderFinished` runs after Loader has closed its normal `plg:ldr` session. The target process has not started executing at any of those stages. Returning `false` from `prepare` suppresses that registration's later callbacks for the current launch without aborting the title.
 
-HOME Menu has a separate registry and dispatches from Loader's existing HOME-specific patch point. Multiple plugins can register for the same title or HOME; callbacks run in registration order. Registration objects, title-ID arrays and callbacks belong to the consumer plugin and must remain valid while registered.
+HOME Menu has a separate registry and dispatches from Loader's existing HOME-specific patch point. The return value of a HOME `prepare` callback is ignored. Multiple plugins can register for the same title or HOME; callbacks run in registration order. Registration objects, title-ID arrays and callbacks belong to the consumer plugin and must remain valid while registered.
 
 ### Loader -> Rosalina bridge
 
@@ -182,6 +184,8 @@ MENU also guards stock Loader's own single-session `plg:ldr` use. Bridge traffic
 
 MENU keeps its HTTPS implementation in compressed `.3on` metadata and only loads it when the Online Menu needs it.
 
+Current `.3on` files use a fixed 48-byte header. `onlinepagetemp.3on` is the current Online page; `onlinetemporary.3on` is an older compatibility payload and is not built by this repository.
+
 The HTTPS library exposes this API back to MENU:
 
 ```c
@@ -198,6 +202,7 @@ Normal `.3nx` plugins should generally use the public MENU Online functions inst
 Online sources can point to downloadable `.3on` pages. These receive `MENUOnlineApi` containing:
 
 ```c
+u32 version;
 void drawLock(void);
 void drawUnlock(void);
 void drawClear(void);
@@ -220,7 +225,14 @@ Result fileExists(const char *path, bool *exists);
 Result enumerateDirectory(const char *path, MENUOnlineDirVisitor visitor, void *context, u32 *entriesVisited);
 
 const char *sourceUrlPrefix;
+
+bool addSysplugin(const char *name);
+bool disableSysplugin(const char *name);
+bool enableSysplugin(const char *name);
+bool deleteSysplugin(const char *name);
 ```
+
+`version` is currently 6. The four sysplugin management callbacks require version 6 and must be checked before use. With API version 5, the current Online page offers the MENU update first.
 
 `sourceUrlPrefix` is the directory URL the current `.3on` came from, so assets can sit beside it without hardcoding the complete web path.
 

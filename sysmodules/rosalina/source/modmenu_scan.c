@@ -60,103 +60,101 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_OpenPluginFile(
     u32 bestOffset = 0;
     u32 bestMetadataOffset = 0;
     u32 bestMetadataSize = 0;
-
     if (!pluginId || !context)
         return false;
-
     context->archive = 0;
     context->file = 0;
     context->entryOffset = 0;
     context->metadataOffset = 0;
     context->metadataSize = 0;
-
     PLUGIN_MENU_LockWord(&g_MENUPluginFileLock);
-    if (!PLUGIN_MENU_ScanAllocScratch())
-        goto done;
+    bool allocScratchResult;
+    {
+        u32 base = 0;
+        if (g_MENUScanScratch)
+        {
+            allocScratchResult = true;
+            goto allocScratchDone;
+        }
+        if (!PLUGIN_MENU_TempAlloc(0x1000u, &base))
+        {
+            allocScratchResult = false;
+            goto allocScratchDone;
+        }
+        g_MENUScanScratch = (PluginMenuScanScratch *) base;
+        allocScratchResult = true;
+        allocScratchDone:;
 
-    if (R_FAILED(MENU_HOST__FSUSER_OpenArchive(
-            &archive,
-            ARCHIVE_SDMC,
-            MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
+    }
+    if (!allocScratchResult)
+        goto done;
+    if (R_FAILED(MENU_HOST__FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
     {
         goto done;
     }
-
     // first find the duplicate winner K11 would pick
-    if (R_FAILED(MENU_HOST__FSUSER_OpenDirectory(
-            &directory,
-            archive,
-            MENU_HOST__fsMakePath(PATH_ASCII, g_MENUPluginsPath))))
+    if (R_FAILED(MENU_HOST__FSUSER_OpenDirectory(&directory, archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUPluginsPath))))
     {
         goto close_archive;
     }
-
     for (;;)
     {
         u32 entriesRead = 0;
-        if (R_FAILED(MENU_HOST__FSDIR_Read(directory, &entriesRead, 1, &g_MENUScanEntry)) ||
-            !entriesRead)
+        if (R_FAILED(MENU_HOST__FSDIR_Read(directory, &entriesRead, 1, &g_MENUScanEntry)) || !entriesRead)
         {
             break;
         }
-
         u32 length = 0;
-        while (length + 1u < sizeof(g_MENUScanName) && g_MENUScanEntry.name[length])
+        while ((length + 1u) < sizeof(g_MENUScanName) && g_MENUScanEntry.name[length])
         {
-            g_MENUScanName[length] = (char)g_MENUScanEntry.name[length];
+            g_MENUScanName[length] = (char) g_MENUScanEntry.name[length];
             length++;
         }
+
         g_MENUScanName[length] = 0;
-
         u32 priority;
-        if (!PLUGIN_MENU_ParsePriority(g_MENUScanName, length, &priority) ||
-            !PLUGIN_MENU_MakePluginPath(g_MENUScanName))
+        if (!PLUGIN_MENU_ParsePriority(g_MENUScanName, length, &priority) || !PLUGIN_MENU_MakePluginPath(g_MENUScanName))
         {
             continue;
         }
-
         Handle file = 0;
-        if (R_FAILED(MENU_HOST__FSUSER_OpenFile(
-                &file,
-                archive,
-                MENU_HOST__fsMakePath(PATH_ASCII, g_MENUScanPath),
-                FS_OPEN_READ,
-                0)))
+        if (R_FAILED(MENU_HOST__FSUSER_OpenFile(&file, archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUScanPath), FS_OPEN_READ, 0)))
         {
             continue;
         }
-
         u32 offset = 0;
         for (;;)
         {
             PluginMenu3nxHeader header;
             u32 metadataOffset;
             u32 nextOffset;
-
-            if (!PLUGIN_MENU_ReadHeader(file, offset, &header, &metadataOffset, &nextOffset) ||
-                (header.magic != MENU_PLUGIN_MAGIC && header.magic != LOADER_PLUGIN_MAGIC))
+            if (!PLUGIN_MENU_ReadHeader(file, offset, &header, &metadataOffset, &nextOffset) || (header.magic != MENU_PLUGIN_MAGIC && header.magic != LOADER_PLUGIN_MAGIC))
             {
                 break;
             }
-
-            if (header.magic == MENU_PLUGIN_MAGIC &&
-                header.pluginId == pluginId &&
-                PLUGIN_MENU_IsEarlier(
-                    found,
-                    priority,
-                    g_MENUScanName,
-                    offset,
-                    bestPriority,
-                    bestOffset))
+            if (header.magic == MENU_PLUGIN_MAGIC && header.pluginId == pluginId && PLUGIN_MENU_IsEarlier(found, priority, g_MENUScanName, offset, bestPriority, bestOffset))
             {
                 found = true;
                 bestPriority = priority;
                 bestOffset = offset;
                 bestMetadataOffset = metadataOffset;
                 bestMetadataSize = header.metadataSize;
-                PLUGIN_MENU_CopyString(g_MENUBestName, g_MENUScanName, sizeof(g_MENUBestName));
-            }
+                {
+                    char *copyStringDst = g_MENUBestName;
+                    const char *copyStringSrc = g_MENUScanName;
+                    u32 copyStringSize = sizeof(g_MENUBestName);
+                    volatile char *out = copyStringDst;
+                    const volatile char *in = copyStringSrc;
+                    u32 i = 0;
+                    while ((i + 1u) < copyStringSize && in[i])
+                    {
+                        out[i] = in[i];
+                        i++;
+                    }
 
+                    out[i] = 0;
+                }
+            }
             offset = nextOffset;
         }
 
@@ -165,80 +163,52 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_OpenPluginFile(
 
     MENU_HOST__FSDIR_Close(directory);
     directory = 0;
-
     if (!found)
         goto close_archive;
-
     // then make sure it lands inside K11's first 31 IDs
     {
         u32 earlierIds[MENU_SYSPLUGIN_MAX_PLUGINS];
         u32 earlierCount = 0;
-
-        if (R_FAILED(MENU_HOST__FSUSER_OpenDirectory(
-                &directory,
-                archive,
-                MENU_HOST__fsMakePath(PATH_ASCII, g_MENUPluginsPath))))
+        if (R_FAILED(MENU_HOST__FSUSER_OpenDirectory(&directory, archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUPluginsPath))))
         {
             goto close_archive;
         }
-
         for (;;)
         {
             u32 entriesRead = 0;
-            if (R_FAILED(MENU_HOST__FSDIR_Read(directory, &entriesRead, 1, &g_MENUScanEntry)) ||
-                !entriesRead)
+            if (R_FAILED(MENU_HOST__FSDIR_Read(directory, &entriesRead, 1, &g_MENUScanEntry)) || !entriesRead)
             {
                 break;
             }
-
             u32 length = 0;
-            while (length + 1u < sizeof(g_MENUScanName) && g_MENUScanEntry.name[length])
+            while ((length + 1u) < sizeof(g_MENUScanName) && g_MENUScanEntry.name[length])
             {
-                g_MENUScanName[length] = (char)g_MENUScanEntry.name[length];
+                g_MENUScanName[length] = (char) g_MENUScanEntry.name[length];
                 length++;
             }
+
             g_MENUScanName[length] = 0;
-
             u32 priority;
-            if (!PLUGIN_MENU_ParsePriority(g_MENUScanName, length, &priority) ||
-                !PLUGIN_MENU_MakePluginPath(g_MENUScanName))
+            if (!PLUGIN_MENU_ParsePriority(g_MENUScanName, length, &priority) || !PLUGIN_MENU_MakePluginPath(g_MENUScanName))
             {
                 continue;
             }
-
             Handle file = 0;
-            if (R_FAILED(MENU_HOST__FSUSER_OpenFile(
-                    &file,
-                    archive,
-                    MENU_HOST__fsMakePath(PATH_ASCII, g_MENUScanPath),
-                    FS_OPEN_READ,
-                    0)))
+            if (R_FAILED(MENU_HOST__FSUSER_OpenFile(&file, archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUScanPath), FS_OPEN_READ, 0)))
             {
                 continue;
             }
-
             u32 offset = 0;
             for (;;)
             {
                 PluginMenu3nxHeader header;
                 u32 metadataOffset;
                 u32 nextOffset;
-
-                if (!PLUGIN_MENU_ReadHeader(file, offset, &header, &metadataOffset, &nextOffset) ||
-                    (header.magic != MENU_PLUGIN_MAGIC && header.magic != LOADER_PLUGIN_MAGIC))
+                if (!PLUGIN_MENU_ReadHeader(file, offset, &header, &metadataOffset, &nextOffset) || (header.magic != MENU_PLUGIN_MAGIC && header.magic != LOADER_PLUGIN_MAGIC))
                 {
                     break;
                 }
-
-                if (header.magic == MENU_PLUGIN_MAGIC &&
-                    header.pluginId != pluginId &&
-                    PLUGIN_MENU_IsEarlier(
-                        true,
-                        priority,
-                        g_MENUScanName,
-                        offset,
-                        bestPriority,
-                        bestOffset))
+                if (header.magic == MENU_PLUGIN_MAGIC && header.pluginId != pluginId && PLUGIN_MENU_IsEarlier(true, priority, g_MENUScanName, offset, bestPriority, bestOffset))
                 {
                     bool duplicate = false;
                     for (u32 i = 0; i < earlierCount; i++)
@@ -252,7 +222,7 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_OpenPluginFile(
 
                     if (!duplicate)
                     {
-                        if (earlierCount >= MENU_SYSPLUGIN_MAX_PLUGINS - 1u)
+                        if (earlierCount >= (MENU_SYSPLUGIN_MAX_PLUGINS - 1u))
                         {
                             selected = false;
                             break;
@@ -260,7 +230,6 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_OpenPluginFile(
                         earlierIds[earlierCount++] = header.pluginId;
                     }
                 }
-
                 offset = nextOffset;
             }
 
@@ -272,43 +241,25 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_OpenPluginFile(
         MENU_HOST__FSDIR_Close(directory);
         directory = 0;
     }
-
     if (!selected || !PLUGIN_MENU_MakePluginPath(g_MENUBestName))
         goto close_archive;
-
-    if (R_FAILED(MENU_HOST__FSUSER_OpenFile(
-            &context->file,
-            archive,
-            MENU_HOST__fsMakePath(PATH_ASCII, g_MENUScanPath),
-            FS_OPEN_READ,
-            0)))
+    if (R_FAILED(MENU_HOST__FSUSER_OpenFile(&context->file, archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUScanPath), FS_OPEN_READ, 0)))
     {
         context->file = 0;
         goto close_archive;
     }
-
     // re-read after the scans in case the file changed underneath us
     {
         PluginMenu3nxHeader header;
         u32 metadataOffset;
         u32 nextOffset;
-        if (!PLUGIN_MENU_ReadHeader(
-                context->file,
-                bestOffset,
-                &header,
-                &metadataOffset,
-                &nextOffset) ||
-            header.magic != MENU_PLUGIN_MAGIC ||
-            header.pluginId != pluginId ||
-            metadataOffset != bestMetadataOffset ||
-            header.metadataSize != bestMetadataSize)
+        if (!PLUGIN_MENU_ReadHeader(context->file, bestOffset, &header, &metadataOffset, &nextOffset) || header.magic != MENU_PLUGIN_MAGIC || header.pluginId != pluginId || metadataOffset != bestMetadataOffset || header.metadataSize != bestMetadataSize)
         {
             MENU_HOST__FSFILE_Close(context->file);
             context->file = 0;
             goto close_archive;
         }
     }
-
     context->archive = archive;
     context->entryOffset = bestOffset;
     context->metadataOffset = bestMetadataOffset;
@@ -316,14 +267,19 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_OpenPluginFile(
     archive = 0;
     success = true;
     goto done;
-
-close_archive:
+    close_archive:
     if (directory)
         MENU_HOST__FSDIR_Close(directory);
+
     if (archive)
         MENU_HOST__FSUSER_CloseArchive(archive);
-done:
-    PLUGIN_MENU_ScanFreeScratch();
+    done:
+    {
+        if (g_MENUScanScratch)
+            PLUGIN_MENU_TempFree((u32) g_MENUScanScratch, 0x1000u);
+        g_MENUScanScratch = NULL;
+    }
+
     PLUGIN_MENU_UnlockWord(&g_MENUPluginFileLock);
     return success;
 }
@@ -343,41 +299,6 @@ PLUGIN_CODE(MENU) void PLUGIN_MENU_ClosePluginFile(PluginMenuFileContext *contex
     context->entryOffset = 0;
     context->metadataOffset = 0;
     context->metadataSize = 0;
-}
-
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_LoadSeenState(void)
-{
-    g_MENUUnread = true;
-    g_MENUHasExpectedEnv = false;
-    PLUGIN_MENU_expectedEnv = 0;
-
-    if (g_MENUBootSelf.found &&
-        (g_MENUBootSelf.expectedEnvLo || g_MENUBootSelf.expectedEnvHi))
-    {
-        u32 expectedEnvLo = g_MENUBootSelf.expectedEnvLo & ~1u;
-        PLUGIN_MENU_expectedEnv =
-            ((u64)g_MENUBootSelf.expectedEnvHi << 32) | expectedEnvLo;
-        g_MENUHasExpectedEnv = true;
-
-        PluginMenuSeenState state;
-        if (PLUGIN_MENU_LoadData(MENU_PLUGIN_ID, &state, sizeof(state)) &&
-            state.expectedEnvLo == (u32)PLUGIN_MENU_expectedEnv &&
-            state.expectedEnvHi == (u32)(PLUGIN_MENU_expectedEnv >> 32))
-        {
-            g_MENUUnread = false;
-        }
-    }
-}
-
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_SaveSeenState(void)
-{
-    if (!g_MENUHasExpectedEnv)
-        return false;
-
-    PluginMenuSeenState state;
-    state.expectedEnvLo = (u32)PLUGIN_MENU_expectedEnv;
-    state.expectedEnvHi = (u32)(PLUGIN_MENU_expectedEnv >> 32);
-    return PLUGIN_MENU_SaveData(MENU_PLUGIN_ID, &state, sizeof(state));
 }
 
 #endif

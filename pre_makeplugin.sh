@@ -12,17 +12,40 @@ fi
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$SCRIPT_DIR"
 
+BUILD_PATCH="${SCRIPT_DIR}/sysmodules/rosalina/httpslib_tls/rosalina-makefile.patch"
+
+python3 - "$SCRIPT_DIR" "$BUILD_PATCH" <<'PY_BUILD'
+from pathlib import Path
+import hashlib
+import subprocess
+import sys
+
+root = Path(sys.argv[1])
+patch = Path(sys.argv[2])
+makefile = root / 'sysmodules/rosalina/Makefile'
+stock = '7358f39a996480c2cdb21dbb0ec2fdc57a71f2fde7e9a84158a008eaff840bab'
+prepared = '65c3378d08a2826b0843a239726c87dab416bc9d6b8f5e753702978f597ec949'
+digest = hashlib.sha256(makefile.read_bytes()).hexdigest()
+if digest == stock:
+    subprocess.run(['patch', '--batch', '--fuzz=0', '-p1', '-i', str(patch)], cwd=root, check=True)
+elif digest != prepared:
+    raise SystemExit('ERROR: unsupported Rosalina Makefile; use the pinned clean Nexus source.')
+if hashlib.sha256(makefile.read_bytes()).hexdigest() != prepared:
+    raise SystemExit('ERROR: MENU TLS build integration did not match the expected result.')
+PY_BUILD
+
 # HTTPSLIB transient version. Change this one value when bumping httpslib.
-HTTPSLIB_VERSION=106
+HTTPSLIB_VERSION=110
 
 MAIN_BUILDER="${SCRIPT_DIR}/makeplugin.sh"
-TRANSIENT_TOOL="${SCRIPT_DIR}/sysplugin/make_transient_3on.py"
-COMPRESS_TOOL="${SCRIPT_DIR}/sysplugin/compress_3on_lzss.py"
+FINALIZE_TOOL="${SCRIPT_DIR}/sysplugin/finalize_transient_3on.py"
+COMPRESS_TOOL="${SCRIPT_DIR}/sysplugin/compress_lzss.py"
 HTTPSLIB_SOURCE="${SCRIPT_DIR}/sysmodules/rosalina/source/httpslib.c"
+HTTPSLIB_SOURCES="${SCRIPT_DIR}/sysmodules/rosalina/source/httpslib_sources.c"
 HTTPSLIB_BUILD="${SCRIPT_DIR}/sysmodules/rosalina/httpslib_tls/build.sh"
 ONLINE_SOURCE="${SCRIPT_DIR}/sysmodules/rosalina/source/online.c"
 
-for required in "$MAIN_BUILDER" "$TRANSIENT_TOOL" "$COMPRESS_TOOL" "$HTTPSLIB_SOURCE" "$HTTPSLIB_BUILD" "$ONLINE_SOURCE"; do
+for required in "$MAIN_BUILDER" "$FINALIZE_TOOL" "$COMPRESS_TOOL" "$HTTPSLIB_SOURCE" "$HTTPSLIB_SOURCES" "$HTTPSLIB_BUILD" "$ONLINE_SOURCE"; do
     if [[ ! -f "$required" ]]; then
         printf 'ERROR: required MENU extras file is missing: %s\n' "$required" >&2
         exit 1
@@ -40,9 +63,9 @@ fi
 
 TEMP_BUILDER="$(mktemp "${SCRIPT_DIR}/.makemenuextras.makeplugin.XXXXXX")"
 BACKUP_DIR="$(mktemp -d "${SCRIPT_DIR}/.makemenuextras.backup.XXXXXX")"
-TEMP_HTTPS_OUT="${SCRIPT_DIR}/.httpslib.3on.new.$$"
 TEMP_HTTPS_COMPRESSED="${SCRIPT_DIR}/.httpslib.3on.lz.new.$$"
-TEMP_ONLINE_OUT="${SCRIPT_DIR}/.onlinetemporary.3on.new.$$"
+TEMP_HTTPS_LZ10="${SCRIPT_DIR}/.httpslib.lz10.new.$$"
+VERSION_METADATA="${SCRIPT_DIR}/.httpslib-version.$$"
 EXTRA_STATE_DIR="${SCRIPT_DIR}/.plgbuild-menuextras"
 SEMANTIC_STATE_DIR="${SCRIPT_DIR}/.plgbuild"
 mkdir -p "$EXTRA_STATE_DIR" "$SEMANTIC_STATE_DIR"
@@ -95,8 +118,8 @@ cleanup() {
     local status=$?
     trap - EXIT
     set +e
-    rm -f -- "$TEMP_BUILDER" "$TEMP_HTTPS_OUT" "$TEMP_HTTPS_COMPRESSED" "$TEMP_ONLINE_OUT"
-    rm -f -- "${SCRIPT_DIR}/httpslib.998.3nx" "${SCRIPT_DIR}/onlinetemporary.999.3nx"
+    rm -f -- "$TEMP_BUILDER" "$TEMP_HTTPS_COMPRESSED" "$TEMP_HTTPS_LZ10" "$VERSION_METADATA"
+    rm -f -- "${SCRIPT_DIR}/httpslib-build.3on" "${SCRIPT_DIR}/onlinepagetemp-build.3on"
     for rel in "${GENERATED_FILES[@]}"; do
         rm -f -- "${SCRIPT_DIR}/${rel}"
     done
@@ -113,7 +136,7 @@ trap cleanup EXIT INT TERM HUP
 cp -- "$MAIN_BUILDER" "$TEMP_BUILDER"
 chmod +x "$TEMP_BUILDER"
 
-python3 - "$TEMP_BUILDER" <<'PY2'
+python3 - "$TEMP_BUILDER" "${VERSION_METADATA##*/}" <<'PY2'
 import pathlib
 import re
 import sys
@@ -130,17 +153,31 @@ def replace_array(name, body):
         raise SystemExit(f'ERROR: could not locate {name} in makeplugin.sh')
 
 replace_array('ROSALINA_PLUGIN_CONFIG', [
-    '"htps|httpslib|998|"',
-    '"onln|onlinetemporary|999|"',
+    '"htps|httpslib-build||transient"',
+    '"onln|onlinepagetemp-build||transient"',
 ])
 replace_array('LOADER_PLUGIN_CONFIG', [])
-replace_array('METADATA_CONFIG', [])
+replace_array('METADATA_CONFIG', [f'"httpslib-build|{sys.argv[2]}"'])
 replace_array('STACKED_PLUGIN_CONFIG', [])
 
 text, count = re.subn(r'(?m)^STATE_DIR="\.plgbuild"$', 'STATE_DIR=".plgbuild-menuextras"', text, count=1)
 if count != 1:
     raise SystemExit('ERROR: could not isolate MENU extras build state')
 path.write_text(text)
+PY2
+
+python3 - "$VERSION_METADATA" "$HTTPSLIB_VERSION" <<'PY2'
+import pathlib
+import struct
+import sys
+
+try:
+    version = int(sys.argv[2], 10)
+except ValueError:
+    raise SystemExit('ERROR: HTTPSLIB_VERSION must be a decimal integer')
+if not 0 <= version <= 0xFFFFFFFF:
+    raise SystemExit('ERROR: HTTPSLIB_VERSION must fit in an unsigned 32-bit value')
+pathlib.Path(sys.argv[1]).write_bytes(b'3NXO' + struct.pack('<I', version))
 PY2
 
 printf '\n=========================================\n'
@@ -160,73 +197,53 @@ seed_semantic_state
 bash "$TEMP_BUILDER"
 sync_semantic_state
 
-HTTPS_NX="${SCRIPT_DIR}/httpslib.998.3nx"
-ONLINE_NX="${SCRIPT_DIR}/onlinetemporary.999.3nx"
-if [[ ! -f "$HTTPS_NX" || ! -f "$ONLINE_NX" ]]; then
-    printf 'ERROR: private plugin build did not produce both transient source .3nx files.\n' >&2
+HTTPS_ON="${SCRIPT_DIR}/httpslib-build.3on"
+ONLINE_ON="${SCRIPT_DIR}/onlinepagetemp-build.3on"
+if [[ ! -f "$HTTPS_ON" || ! -f "$ONLINE_ON" ]]; then
+    printf 'ERROR: private plugin build did not produce both .3on files.\n' >&2
     exit 1
 fi
 
-# Keep the stock builder's normal metadata path out of this temporary transient
-# build. Pack httpslib's version metadata directly into its one-entry .3nx, then
-# convert it to the versioned 3NX& form.
-python3 - "$HTTPS_NX" "$HTTPSLIB_VERSION" <<'PY2'
-import pathlib
+python3 "$COMPRESS_TOOL" "$HTTPS_ON" "$TEMP_HTTPS_LZ10"
+
+# The MENU HTTPS fallback stores a version and length before the raw LZ10 stream.
+python3 - "$HTTPS_ON" "$TEMP_HTTPS_LZ10" "$TEMP_HTTPS_COMPRESSED" "$HTTPSLIB_VERSION" <<'PY2'
+from pathlib import Path
 import struct
 import sys
 
-path = pathlib.Path(sys.argv[1])
-try:
-    version = int(sys.argv[2], 10)
-except ValueError:
-    raise SystemExit('ERROR: HTTPSLIB_VERSION must be a decimal integer')
-if not 0 <= version <= 0xFFFFFFFF:
-    raise SystemExit('ERROR: HTTPSLIB_VERSION must fit in an unsigned 32-bit value')
-data = bytearray(path.read_bytes())
-if len(data) < 0x30:
-    raise SystemExit('ERROR: httpslib temporary .3nx is truncated')
-header = list(struct.unpack_from('<12I', data, 0))
-if header[0] != 0x24584E33 or data[4:8] != b'htps' or header[11] != 0:
-    raise SystemExit('ERROR: httpslib temporary .3nx is not a clean single entry')
-raw_end = 0x30 + header[5] + header[2] + header[3] + header[6]
-body_end = (raw_end + 0xF) & ~0xF
-if body_end != len(data):
-    raise SystemExit('ERROR: httpslib temporary .3nx body layout is malformed')
-# httpslib owns its version independently of MENU. Build the transient
-# version metadata directly here, so no versionNNN.bin file is needed.
-metadata = bytearray(b'3NXO' + struct.pack('<I', version))
-metadata += b'\0' * (((len(metadata) + 0xF) & ~0xF) - len(metadata))
-struct.pack_into('<I', data, 0x2C, len(metadata))
-data += metadata
-path.write_bytes(data)
+source = Path(sys.argv[1]).read_bytes()
+if len(source) < 0x30:
+    raise SystemExit('ERROR: HTTPS transient has no modern metadata header')
+fields = struct.unpack_from('<12I', source)
+magic, _pid, code_size, data_size, _bss_size, reloc_size, repair_size = fields[:7]
+metadata_size = fields[11]
+if magic != 0x26584E33:
+    raise SystemExit('ERROR: HTTPS transient is not a 3NX& transient')
+raw_end = 0x30 + reloc_size + code_size + data_size + repair_size
+metadata_offset = (raw_end + 15) & ~15
+if metadata_size < 8 or metadata_offset + metadata_size != len(source):
+    raise SystemExit('ERROR: HTTPS transient metadata is missing or malformed')
+if source[metadata_offset:metadata_offset + 4] != b'3NXO':
+    raise SystemExit('ERROR: HTTPS transient metadata does not begin with 3NXO')
+version = struct.unpack_from('<I', source, metadata_offset + 4)[0]
+if version != int(sys.argv[4], 10):
+    raise SystemExit('ERROR: HTTPS transient metadata version does not match HTTPSLIB_VERSION')
+
+compressed = Path(sys.argv[2]).read_bytes()
+if len(compressed) < 4 or compressed[0] != 0x10:
+    raise SystemExit('ERROR: compressed HTTPS transient has no LZ10 header')
+size = compressed[1] | (compressed[2] << 8) | (compressed[3] << 16)
+if size != len(source):
+    raise SystemExit('ERROR: compressed HTTPS transient has the wrong size')
+Path(sys.argv[3]).write_bytes(b'3NXO' + struct.pack('<II', version, len(compressed)) + compressed)
 PY2
 
-python3 "$TRANSIENT_TOOL" "$HTTPS_NX" "$TEMP_HTTPS_OUT" htps
-python3 "$TRANSIENT_TOOL" "$ONLINE_NX" "$TEMP_ONLINE_OUT" onln
-python3 "$COMPRESS_TOOL" "$TEMP_HTTPS_OUT" "$TEMP_HTTPS_COMPRESSED"
-
-python3 - "$TEMP_HTTPS_OUT" htps "$TEMP_ONLINE_OUT" onln <<'PY2'
-import pathlib
-import struct
-import sys
-
-TRANSIENT_MAGIC = 0x26584E33
-for i in range(1, len(sys.argv), 2):
-    path = pathlib.Path(sys.argv[i])
-    expected_id = sys.argv[i + 1].encode('ascii')
-    data = path.read_bytes()
-    if len(data) < 0x2C:
-        raise SystemExit(f'ERROR: transient output is truncated: {path}')
-    if struct.unpack_from('<I', data, 0)[0] != TRANSIENT_MAGIC or data[4:8] != expected_id:
-        raise SystemExit(f'ERROR: transient output validation failed: {path}')
-PY2
-
-mv -f -- "$TEMP_HTTPS_OUT" "${SCRIPT_DIR}/httpslib.3on"
+mv -f -- "$HTTPS_ON" "${SCRIPT_DIR}/httpslib.3on"
 mv -f -- "$TEMP_HTTPS_COMPRESSED" "${SCRIPT_DIR}/httpslib.3on.lz"
-mv -f -- "$TEMP_ONLINE_OUT" "${SCRIPT_DIR}/onlinetemporary.3on"
-rm -f -- "$HTTPS_NX" "$ONLINE_NX"
+mv -f -- "$ONLINE_ON" "${SCRIPT_DIR}/onlinepagetemp.3on"
 
 printf '\nWrote httpslib.3on (%s bytes, version %s, versioned 3NX& transient)\n' "$(stat -c '%s' -- "${SCRIPT_DIR}/httpslib.3on")" "$HTTPSLIB_VERSION"
 printf 'Wrote httpslib.3on.lz (%s bytes, embedded MENU fallback)\n' "$(stat -c '%s' -- "${SCRIPT_DIR}/httpslib.3on.lz")"
-printf 'Wrote onlinetemporary.3on (%s bytes, source-neutral 3NX& transient)\n' "$(stat -c '%s' -- "${SCRIPT_DIR}/onlinetemporary.3on")"
+printf 'Wrote onlinepagetemp.3on (%s bytes, source-neutral 3NX& transient)\n' "$(stat -c '%s' -- "${SCRIPT_DIR}/onlinepagetemp.3on")"
 printf '\nDone. Normal plugin configuration remains in stock makeplugin.sh.\n\n'

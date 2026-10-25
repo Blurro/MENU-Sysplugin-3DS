@@ -19,18 +19,25 @@
 #define PLUGIN_DATA(id)   __attribute__((section(".plugindata_" #id), used))
 #define PLUGIN_BSS(id)    __attribute__((section(".pluginbss_" #id), used))
 
+// file formats
+
 #define MENU_PLUGIN_MAGIC       0x24584E33u
 #define LOADER_PLUGIN_MAGIC     0x25584E33u
 #define MENU_PLUGIN_ID          0x554E454Du
 #define MENU_HEADER_SIZE        0x30u
+
+// main menu layout
+
 #define MENU_MAX_HOST_ITEMS     24u
 #define MENU_VISIBLE_ITEMS      16u
-#define MENU_ITEM_SPACING_X     6u
 #define MENU_ITEM_SPACING_Y     11u
 #define MENU_ITEM_TOP_Y         45u
 #define MENU_TOP_DOTS_Y         34u
 #define MENU_FRAME_COLOR        RGB565(2, 19, 31)
 #define MENU_DATA_COPY_CHUNK    0x400u
+
+// manage list
+
 #define MENU_MANAGE_VISIBLE_ROWS 14u
 #define MENU_MANAGE_MAX_FILES    96u
 #define MENU_MANAGE_NAME_BYTES   0x1800u
@@ -44,9 +51,9 @@
 #define MENU_MANAGE_CURSOR_COLOR         MENU_FRAME_COLOR
 #define MENU_MANAGE_DETAIL_BOTTOM_Y      209u
 #define MENU_MANAGE_SECTION_ITEM_Y_OFFSET 5u
+#define MENU_MANAGE_INSTALL_HINT_ROWS 3u
 #define MENU_MANAGE_MAX_COMPONENTS 64u
 #define MENU_MANAGE_MAX_MISSING    64u
-
 
 typedef struct __attribute__((packed))
 {
@@ -63,7 +70,6 @@ typedef struct __attribute__((packed))
     u32 expectedEnvHi;
     u32 metadataSize;
 } PluginMenu3nxHeader;
-
 
 typedef struct
 {
@@ -83,10 +89,12 @@ typedef struct __attribute__((packed))
     u32 size;
 } PluginMenuDataEntry;
 
+// temporary https loader
+
 #define MENU_TRANSIENT_MAGIC 0x26584E33u
 #define MENU_HTTPS_ID 0x73707468u
-#define MENU_TRANSIENT_HEADER_SIZE 0x2Cu
-#define MENU_HTTPS_HOST_API_VERSION 5u
+#define MENU_TRANSIENT_HEADER_SIZE 0x30u
+#define MENU_HTTPS_HOST_API_VERSION 6u
 #define MENU_HTTPS_API_VERSION 4u
 #define MENU_TRANSIENT_LOW 0x10000000u
 #define MENU_TRANSIENT_HIGH 0x14000000u
@@ -113,6 +121,7 @@ typedef struct
     u32 ownAbiHi;
     u32 expectedEnvLo;
     u32 expectedEnvHi;
+    u32 metadataSize;
 } MENUTransientHeader;
 
 typedef struct
@@ -143,6 +152,9 @@ typedef struct
     bool (*disableSysplugin)(const char *name);
     bool (*enableSysplugin)(const char *name);
     bool (*deleteSysplugin)(const char *name);
+    void (*readTouch)(touchPosition *position);
+    bool (*addOnlineEntry)(const char *title, const char *url);
+    bool (*removeOnlineEntry)(const char *title);
 } MENUHttpsHostApi;
 
 typedef struct
@@ -154,8 +166,6 @@ typedef struct
     void (*openOnlineSource)(const char *url);
 } MENUHttpsApi;
 
-
-
 typedef struct
 {
     u32 base;
@@ -163,7 +173,6 @@ typedef struct
     u32 totalSize;
     bool codeProtected;
 } MENUTransientImage;
-
 
 typedef struct
 {
@@ -250,7 +259,6 @@ typedef struct
     char name[256];
     char path[272];
     char bestName[256];
-    char altPath[272];
 } PluginMenuScanScratch;
 
 #define MENU_FETCH_CONFIG_MAX 0x800u
@@ -307,6 +315,7 @@ PLUGIN_DATA(MENU) void *pluginTable_MENU[] = {
     (void*)FSUSER_RenameFile,
     (void*)FSUSER_CreateDirectory,
     (void*)PluginLoader__HandleCommands,
+    (void*)hidTouchRead,
 };
 
 #define MENU_HOST__svcSleepThread            ((void(*)(s64))pluginTable_MENU[0])
@@ -325,7 +334,6 @@ PLUGIN_DATA(MENU) void *pluginTable_MENU[] = {
 #define MENU_HOST__Draw_Unlock               ((void(*)(void))pluginTable_MENU[13])
 #define MENU_HOST__Draw_ClearFramebuffer     ((void(*)(void))pluginTable_MENU[14])
 #define MENU_HOST__Draw_DrawString           ((u32(*)(u32,u32,u32,const char*))pluginTable_MENU[15])
-#define MENU_HOST__Draw_DrawCharacter        ((void(*)(u32,u32,u32,char))pluginTable_MENU[16])
 #define MENU_HOST__Draw_FlushFramebuffer     ((void(*)(void))pluginTable_MENU[17])
 #define MENU_HOST__waitInput                 ((u32(*)(void))pluginTable_MENU[18])
 #define MENU_HOST__menuShouldExit            (*(volatile bool*)pluginTable_MENU[19])
@@ -338,34 +346,57 @@ PLUGIN_DATA(MENU) void *pluginTable_MENU[] = {
 #define MENU_HOST__FSUSER_DeleteFile         ((Result(*)(FS_Archive,FS_Path))pluginTable_MENU[28])
 #define MENU_HOST__svcControlMemoryUnsafe     ((Result(*)(u32*,u32,u32,MemOp,MemPerm))pluginTable_MENU[29])
 #define MENU_HOST__waitInputWithTimeout       ((u32(*)(s32))pluginTable_MENU[30])
-#define MENU_HOST__srvGetServiceHandle        ((Result(*)(Handle*,const char*))pluginTable_MENU[31])
-#define MENU_HOST__miniSocInit                ((Result(*)(void))pluginTable_MENU[32])
-#define MENU_HOST__miniSocExit                ((Result(*)(void))pluginTable_MENU[33])
-#define MENU_HOST__socSocket                  ((int(*)(int,int,int))pluginTable_MENU[34])
-#define MENU_HOST__socConnect                 ((int(*)(int,const struct sockaddr*,socklen_t))pluginTable_MENU[35])
-#define MENU_HOST__socPoll                    ((int(*)(struct pollfd*,nfds_t,int))pluginTable_MENU[36])
-#define MENU_HOST__socSendto                  ((ssize_t(*)(int,const void*,size_t,int,const struct sockaddr*,socklen_t))pluginTable_MENU[37])
-#define MENU_HOST__socRecvfrom                ((ssize_t(*)(int,void*,size_t,int,struct sockaddr*,socklen_t*))pluginTable_MENU[38])
-#define MENU_HOST__socClose                   ((int(*)(int))pluginTable_MENU[39])
 #define MENU_HOST__FSUSER_RenameFile          ((Result(*)(FS_Archive,FS_Path,FS_Archive,FS_Path))pluginTable_MENU[40])
-#define MENU_HOST__FSUSER_CreateDirectory     ((Result(*)(FS_Archive,FS_Path,u32))pluginTable_MENU[41])
-
-PLUGIN_RODATA(MENU) const char g_MENUEntryTitle[] = "Sysplugin Menu";
-PLUGIN_RODATA(MENU) const char g_MENUUnreadText[] = "(!)";
-PLUGIN_RODATA(MENU) static const char g_MENUPluginsPath[] = "/luma/plugins";
+#define MENU_HOST__hidTouchRead              ((void(*)(touchPosition*))pluginTable_MENU[43])
 
 PLUGIN_CODE(MENU) u32 PLUGIN_MENU_GetApiVersion(void)
 {
     return SYSPLUGIN_MENU_API_REVISION_PAIR;
 }
 
+// sd paths
+
+#define MENU_PLUGINS_PATH "/luma/plugins"
+PLUGIN_RODATA(MENU) static const char g_MENUPluginsPath[] = MENU_PLUGINS_PATH;
 PLUGIN_RODATA(MENU) static const char g_MENUStatePath[] = "/luma/modmenu.dat";
 PLUGIN_RODATA(MENU) static const char g_MENUTempPath[] = "/luma/modmenu.tmp";
 PLUGIN_RODATA(MENU) static const char g_MENUEmptyPath[] = "";
+PLUGIN_RODATA(MENU) static const char g_MENUManageTempListPath[] = MENU_PLUGINS_PATH "/menutemplist.txt";
+PLUGIN_RODATA(MENU) static const char g_MENUFetchPath[] = MENU_PLUGINS_PATH "/sysplgfetch.txt";
+PLUGIN_RODATA(MENU) static const char g_MENUFetchTempPath[] = MENU_PLUGINS_PATH "/sysplgfetch.tmp";
+PLUGIN_RODATA(MENU) static const char g_MENUHttpsPath[] = MENU_PLUGINS_PATH "/httpslib.3on";
+
+// main menu
+
+PLUGIN_RODATA(MENU) const char g_MENUEntryTitle[] = "Sysplugin Menu";
+PLUGIN_RODATA(MENU) const char g_MENUUnreadText[] = "(!)";
+PLUGIN_RODATA(MENU) static const char g_MENUEmptyText[] =
+    "No Sysplugins? Check out the Online Menu\n"
+    "to download & update what's available!";
 PLUGIN_RODATA(MENU) static const char g_MENUManageItemTitle[] = "Manage Sysplugins...";
+PLUGIN_RODATA(MENU) static const char g_MENUOnlineItemTitle[] = "Open Online Menu...";
+
+// shared frame bits
+
+PLUGIN_RODATA(MENU) static const char g_MENUDots[] = "...";
+PLUGIN_RODATA(MENU) static const char g_MENUPlus[] = "+";
+PLUGIN_RODATA(MENU) static const char g_MENUPipe[] = "|";
+PLUGIN_RODATA(MENU) static const char g_MENURail[] = "-----------------------------------";
+#define MENU_ONLINE_RAIL (g_MENURail + 13u)
+PLUGIN_RODATA(MENU) static const char g_MENUSelectedLeft[] = ">>";
+PLUGIN_RODATA(MENU) static const char g_MENUSelectedRight[] = "<<        ";
+PLUGIN_RODATA(MENU) static const char g_MENUUnselected[] = " *";
+PLUGIN_RODATA(MENU) static const char g_MENUManageCursor[] = ">";
+PLUGIN_RODATA(MENU) static const char g_MENUClearRow[] =
+    "                                                  ";
+
+// manage sysplugins
+
 PLUGIN_RODATA(MENU) static const char g_MENUManageTitle[] = "Manage Sysplugins";
 PLUGIN_RODATA(MENU) static const char g_MENUManageEmptyText[] = "No sysplugins found.";
-PLUGIN_RODATA(MENU) static const char g_MENUManageTempListPath[] = "/luma/plugins/menutemplist.txt";
+PLUGIN_RODATA(MENU) static const char g_MENUManageInstallHint1[] = "No .3nx Sysplugins have been installed.";
+PLUGIN_RODATA(MENU) static const char g_MENUManageInstallHint2[] = "Visit the Online Menu or the Nexus3DS Discord";
+PLUGIN_RODATA(MENU) static const char g_MENUManageInstallHint3[] = "server!";
 PLUGIN_RODATA(MENU) static const char g_MENUManageActive[] = "Active";
 PLUGIN_RODATA(MENU) static const char g_MENUManageDisabled[] = "Disabled";
 PLUGIN_RODATA(MENU) static const char g_MENUManageActionsPrompt[] = "X: actions...";
@@ -384,23 +415,15 @@ PLUGIN_RODATA(MENU) static const char g_MENUManageConfirmTitle[] = "Are you sure
 PLUGIN_RODATA(MENU) static const char g_MENUManageNo[] = "No";
 PLUGIN_RODATA(MENU) static const char g_MENUManageYes[] = "Yes";
 PLUGIN_RODATA(MENU) static const char g_MENUManageFailed[] = "Operation failed.";
-PLUGIN_RODATA(MENU) static const char g_MENUOnlineItemTitle[] = "Open Online Menu...";
-PLUGIN_RODATA(MENU) static const char g_MENUFetchPath[] = "/luma/plugins/sysplgfetch.txt";
-PLUGIN_RODATA(MENU) static const char g_MENUFetchTempPath[] = "/luma/plugins/sysplgfetch.tmp";
-PLUGIN_RODATA(MENU) static const char g_MENUFetchNewline[] = "\n";
-PLUGIN_RODATA(MENU) static const char g_MENUDots[] = "...";
-PLUGIN_RODATA(MENU) static const char g_MENUPlus[] = "+";
-PLUGIN_RODATA(MENU) static const char g_MENUPipe[] = "|";
-PLUGIN_RODATA(MENU) static const char g_MENUSelectedLeft[] = ">>";
-PLUGIN_RODATA(MENU) static const char g_MENUSelectedRight[] = "<<        ";
-PLUGIN_RODATA(MENU) static const char g_MENUUnselected[] = " *";
-PLUGIN_RODATA(MENU) static const char g_MENUManageCursor[] = ">";
-PLUGIN_RODATA(MENU) static const char g_MENUClearRow[] =
-    "                                                  ";
 
-PLUGIN_RODATA(MENU) static const char g_MENUHttpsPath[] = "/luma/plugins/httpslib.3on";
-PLUGIN_RODATA(MENU) static const char g_MENUOnlineErrorTitle[] = "Online Menu";
+// online sources and loading
+
+PLUGIN_RODATA(MENU) static const char g_MENUFetchNewline[] = "\n";
 PLUGIN_RODATA(MENU) static const char g_MENUOpeningHttpsText[] = "Opening httpslib.3on...";
+
+// used for online menu error screen
+
+PLUGIN_RODATA(MENU) static const char g_MENUOnlineErrorTitle[] = "Online Menu";
 PLUGIN_RODATA(MENU) static const char g_MENUOnlineErrorText[] = "Could not load Online Menu";
 PLUGIN_RODATA(MENU) static const char g_MENUOnlineBackText[] = "press B to go back";
 PLUGIN_RODATA(MENU) static const char g_MENUOnlineStageOpenHttps[] = "open httpslib";
@@ -408,28 +431,25 @@ PLUGIN_RODATA(MENU) static const char g_MENUOnlineStageInitHttps[] = "init https
 PLUGIN_RODATA(MENU) static const char g_MENUOnlineStageOpenArchive[] = "open SD";
 PLUGIN_RODATA(MENU) static const char g_MENUOnlineStageOpenFile[] = "open MENU file";
 PLUGIN_RODATA(MENU) static const char g_MENUOnlineStageValidate[] = "validate";
-PLUGIN_RODATA(MENU) static const char g_MENUOnlineStageFindMemory[] = "find memory";
 PLUGIN_RODATA(MENU) static const char g_MENUOnlineStageAllocate[] = "allocate";
 PLUGIN_RODATA(MENU) static const char g_MENUOnlineStageRead[] = "read payload";
 PLUGIN_RODATA(MENU) static const char g_MENUOnlineStageRelocate[] = "relocate";
 PLUGIN_RODATA(MENU) static const char g_MENUOnlineStageProtect[] = "protect RX";
-PLUGIN_RODATA(MENU) static const char g_MENUOnlineStageHttpsCreate[] = "create httpslib";
-PLUGIN_RODATA(MENU) static const char g_MENUOnlineStageHttpsResize[] = "resize httpslib";
 PLUGIN_RODATA(MENU) static const char g_MENUOnlineStageHttpsRead[] = "read embedded";
 PLUGIN_RODATA(MENU) static const char g_MENUOnlineStageHttpsDecode[] = "decode httpslib";
 PLUGIN_RODATA(MENU) static const char g_MENUOnlineStageHttpsWrite[] = "write httpslib";
 PLUGIN_RODATA(MENU) static const char g_MENUOnlineResultPrefix[] = "result 0x";
 PLUGIN_RODATA(MENU) static const char g_MENUOnlineHexDigits[] = "0123456789ABCDEF";
-PLUGIN_RODATA(MENU) static const char g_MENUOnlinePlus[] = "+";
-PLUGIN_RODATA(MENU) static const char g_MENUOnlinePipe[] = "|";
-PLUGIN_RODATA(MENU) static const char g_MENUOnlineRail[] = "----------------------";
+
+// online load state
+
 PLUGIN_DATA(MENU) static const char *g_MENUOnlineLastStage = g_MENUOnlineStageValidate;
-PLUGIN_DATA(MENU) static Result g_MENUOnlineLastResult = 0;
 PLUGIN_DATA(MENU) static void (*g_MENUHttpsOpenOnline)(void) = NULL;
 PLUGIN_DATA(MENU) static void (*g_MENUHttpsOpenOnlineSource)(const char *url) = NULL;
 PLUGIN_BSS(MENU) static MENUHttpsHostApi g_MENUHttpsHostApi;
 PLUGIN_BSS(MENU) static char g_MENUOnlineResultHex[9];
 
+// menu state
 
 PLUGIN_DATA(MENU) bool g_MENUUnread = true;
 PLUGIN_BSS(MENU) bool g_MENUInsideMenu;
@@ -439,26 +459,40 @@ PLUGIN_BSS(MENU) static volatile s32 g_MENURegistryLock;
 PLUGIN_BSS(MENU) static volatile s32 g_MENUDataLock;
 PLUGIN_BSS(MENU) static volatile s32 g_MENUFetchLock;
 PLUGIN_BSS(MENU) static volatile s32 g_MENUSyspluginStateLock;
+
+// registered pages
+
 PLUGIN_BSS(MENU) static PluginMenuRegistration *g_MENUFirstItem;
 PLUGIN_BSS(MENU) static PluginMenuRegistration *g_MENULastItem;
 PLUGIN_BSS(MENU) static u32 g_MENUItemCount;
 PLUGIN_BSS(MENU) static u32 g_MENURegistryGeneration;
 PLUGIN_BSS(MENU) static PluginMenuRegistration g_MENUManageItem;
 PLUGIN_BSS(MENU) static PluginMenuRegistration g_MENUOnlineItem;
+
+// source editor
+
 PLUGIN_BSS(MENU) static char *g_MENUFetchEditConfig;
 PLUGIN_BSS(MENU) static PluginMenuFetchSource *g_MENUFetchEditSources;
 PLUGIN_BSS(MENU) static u32 g_MENUFetchScratchBase;
+
+// file scans
+
 PLUGIN_BSS(MENU) static PluginMenuScanScratch *g_MENUScanScratch;
 #define g_MENUScanEntry (g_MENUScanScratch->entry)
 #define g_MENUScanName  (g_MENUScanScratch->name)
 #define g_MENUScanPath  (g_MENUScanScratch->path)
 #define g_MENUBestName  (g_MENUScanScratch->bestName)
-#define g_MENUScanAltPath (g_MENUScanScratch->altPath)
 PLUGIN_BSS(MENU) static volatile s32 g_MENUPluginFileLock;
+
+// online and root item state
+
 PLUGIN_BSS(MENU) static bool g_MENUHttpsReady;
 PLUGIN_BSS(MENU) static bool g_MENURootInserted;
 PLUGIN_BSS(MENU) static u32 g_MENURootIndex;
 PLUGIN_BSS(MENU) static u32 g_MENURootOriginalCount;
+
+// manage workspace
+
 PLUGIN_BSS(MENU) static PluginMenuManageFile *g_MENUManageFiles;
 PLUGIN_BSS(MENU) static char *g_MENUManageNames;
 PLUGIN_BSS(MENU) static char *g_MENUManageChanges;
@@ -470,6 +504,7 @@ PLUGIN_BSS(MENU) static u32 g_MENUManageActiveCount;
 PLUGIN_BSS(MENU) static u32 g_MENUManageNameUsed;
 PLUGIN_BSS(MENU) static u32 g_MENUManageChangeSize;
 PLUGIN_BSS(MENU) static bool g_MENUManageCapturingBoot;
+PLUGIN_BSS(MENU) static bool g_MENUManageShowInstallHint;
 PLUGIN_BSS(MENU) static PluginMenuBootSelf g_MENUBootSelf;
 
 PLUGIN_CODE(MENU) bool PLUGIN_MENU_FindFreeRange(u32 size, u32 *outBase);
@@ -479,8 +514,8 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_AddSysplugin(const char *name);
 PLUGIN_CODE(MENU) bool PLUGIN_MENU_DisableSysplugin(const char *name);
 PLUGIN_CODE(MENU) bool PLUGIN_MENU_EnableSysplugin(const char *name);
 PLUGIN_CODE(MENU) bool PLUGIN_MENU_DeleteSysplugin(const char *name);
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ScanAllocScratch(void);
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_ScanFreeScratch(void);
+PLUGIN_CODE(MENU) bool PLUGIN_MENU_AddOnlineEntry(const char *title, const char *url);
+PLUGIN_CODE(MENU) bool PLUGIN_MENU_RemoveOnlineEntry(const char *title);
 
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_LockWord(volatile s32 *word)
 {
@@ -511,36 +546,6 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_UnlockWord(volatile s32 *word)
     *word = 0;
 }
 
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_LockRegistry(void)
-{
-    PLUGIN_MENU_LockWord(&g_MENURegistryLock);
-}
-
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_UnlockRegistry(void)
-{
-    PLUGIN_MENU_UnlockWord(&g_MENURegistryLock);
-}
-
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_LockData(void)
-{
-    PLUGIN_MENU_LockWord(&g_MENUDataLock);
-}
-
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_UnlockData(void)
-{
-    PLUGIN_MENU_UnlockWord(&g_MENUDataLock);
-}
-
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_LockFetch(void)
-{
-    PLUGIN_MENU_LockWord(&g_MENUFetchLock);
-}
-
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_UnlockFetch(void)
-{
-    PLUGIN_MENU_UnlockWord(&g_MENUFetchLock);
-}
-
 // registered pages live in one linked list
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_AppendInternal(
     PluginMenuRegistration *item,
@@ -552,29 +557,25 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_AppendInternal(
 {
     if (!item || !title || !callback)
         return false;
-
-    PLUGIN_MENU_LockRegistry();
+    PLUGIN_MENU_LockWord(&g_MENURegistryLock);
     if (g_MENUItemCount == 0xFFFFFFFFu)
     {
-        PLUGIN_MENU_UnlockRegistry();
+        PLUGIN_MENU_UnlockWord(&g_MENURegistryLock);
         return false;
     }
-
     item->pluginId = pluginId;
     item->title = title;
     item->callback = callback;
     item->color = color;
     item->next = NULL;
-
     if (g_MENULastItem)
         g_MENULastItem->next = item;
     else
         g_MENUFirstItem = item;
-
     g_MENULastItem = item;
     g_MENUItemCount++;
     g_MENURegistryGeneration++;
-    PLUGIN_MENU_UnlockRegistry();
+    PLUGIN_MENU_UnlockWord(&g_MENURegistryLock);
     return true;
 }
 
@@ -589,9 +590,7 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_AddItem(
 {
     if (!item || !pluginId || !title || !callback)
         return false;
-
-    PLUGIN_MENU_LockRegistry();
-
+    PLUGIN_MENU_LockWord(&g_MENURegistryLock);
     for (PluginMenuRegistration *current = g_MENUFirstItem; current; current = current->next)
     {
         if (current == item)
@@ -601,32 +600,29 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_AddItem(
             current->callback = callback;
             current->color = color;
             g_MENURegistryGeneration++;
-            PLUGIN_MENU_UnlockRegistry();
+            PLUGIN_MENU_UnlockWord(&g_MENURegistryLock);
             return true;
         }
     }
 
     if (g_MENUItemCount == 0xFFFFFFFFu)
     {
-        PLUGIN_MENU_UnlockRegistry();
+        PLUGIN_MENU_UnlockWord(&g_MENURegistryLock);
         return false;
     }
-
     item->pluginId = pluginId;
     item->title = title;
     item->callback = callback;
     item->color = color;
     item->next = NULL;
-
     if (g_MENULastItem)
         g_MENULastItem->next = item;
     else
         g_MENUFirstItem = item;
-
     g_MENULastItem = item;
     g_MENUItemCount++;
     g_MENURegistryGeneration++;
-    PLUGIN_MENU_UnlockRegistry();
+    PLUGIN_MENU_UnlockWord(&g_MENURegistryLock);
     return true;
 }
 
@@ -634,15 +630,11 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_RemoveItem(PluginMenuRegistration *item)
 {
     if (!item)
         return false;
-
     if (item == &g_MENUManageItem)
         return false;
-
-    PLUGIN_MENU_LockRegistry();
-
+    PLUGIN_MENU_LockWord(&g_MENURegistryLock);
     PluginMenuRegistration *previous = NULL;
     PluginMenuRegistration *current = g_MENUFirstItem;
-
     while (current && current != item)
     {
         previous = current;
@@ -651,18 +643,15 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_RemoveItem(PluginMenuRegistration *item)
 
     if (!current)
     {
-        PLUGIN_MENU_UnlockRegistry();
+        PLUGIN_MENU_UnlockWord(&g_MENURegistryLock);
         return false;
     }
-
     if (previous)
         previous->next = current->next;
     else
         g_MENUFirstItem = current->next;
-
     if (g_MENULastItem == current)
         g_MENULastItem = previous;
-
     current->pluginId = 0;
     current->title = NULL;
     current->callback = NULL;
@@ -670,47 +659,12 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_RemoveItem(PluginMenuRegistration *item)
     current->next = NULL;
     g_MENUItemCount--;
     g_MENURegistryGeneration++;
-    PLUGIN_MENU_UnlockRegistry();
+    PLUGIN_MENU_UnlockWord(&g_MENURegistryLock);
     return true;
 }
 
 #include "modmenu_data.c"
 #include "modmenu_scan.c"
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_GetRegistryState(
-    u32 *count,
-    u32 *generation
-)
-{
-    PLUGIN_MENU_LockRegistry();
-    *count = g_MENUItemCount;
-    *generation = g_MENURegistryGeneration;
-    PLUGIN_MENU_UnlockRegistry();
-}
-
-PLUGIN_CODE(MENU) static u32 PLUGIN_MENU_SnapshotItems(
-    u32 first,
-    const char **titles,
-    u32 *colors
-)
-{
-    PLUGIN_MENU_LockRegistry();
-
-    PluginMenuRegistration *item = g_MENUFirstItem;
-    for (u32 i = 0; item && i < first; i++)
-        item = item->next;
-
-    u32 count = 0;
-    while (item && count < MENU_VISIBLE_ITEMS)
-    {
-        titles[count] = item->title;
-        colors[count] = item->color;
-        count++;
-        item = item->next;
-    }
-
-    PLUGIN_MENU_UnlockRegistry();
-    return count;
-}
 
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_GetPresentation(
     u32 index,
@@ -718,8 +672,7 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_GetPresentation(
     u32 *color
 )
 {
-    PLUGIN_MENU_LockRegistry();
-
+    PLUGIN_MENU_LockWord(&g_MENURegistryLock);
     PluginMenuRegistration *item = g_MENUFirstItem;
     for (u32 i = 0; item && i < index; i++)
         item = item->next;
@@ -729,35 +682,19 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_GetPresentation(
         *title = item->title;
         *color = item->color;
     }
-
-    PLUGIN_MENU_UnlockRegistry();
+    PLUGIN_MENU_UnlockWord(&g_MENURegistryLock);
     return item != NULL;
-}
-
-PLUGIN_CODE(MENU) static void (*PLUGIN_MENU_GetCallback(u32 index))(void)
-{
-    PLUGIN_MENU_LockRegistry();
-
-    PluginMenuRegistration *item = g_MENUFirstItem;
-    for (u32 i = 0; item && i < index; i++)
-        item = item->next;
-
-    void (*callback)(void) = item ? item->callback : NULL;
-    PLUGIN_MENU_UnlockRegistry();
-    return callback;
 }
 
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_DrawFrame(const char *title)
 {
     MENU_HOST__Draw_DrawString(10, 8, MENU_FRAME_COLOR, g_MENUPlus);
-    for (u32 i = 0; i < 35u; i++)
-        MENU_HOST__Draw_DrawCharacter(16u + i * MENU_ITEM_SPACING_X, 8, MENU_FRAME_COLOR, '-');
+    MENU_HOST__Draw_DrawString(16, 8, MENU_FRAME_COLOR, g_MENURail);
     MENU_HOST__Draw_DrawString(222, 8, MENU_FRAME_COLOR, g_MENUPlus);
     MENU_HOST__Draw_DrawString(10, 16, MENU_FRAME_COLOR, g_MENUPipe);
     MENU_HOST__Draw_DrawString(222, 16, MENU_FRAME_COLOR, g_MENUPipe);
     MENU_HOST__Draw_DrawString(10, 24, MENU_FRAME_COLOR, g_MENUPlus);
-    for (u32 i = 0; i < 35u; i++)
-        MENU_HOST__Draw_DrawCharacter(16u + i * MENU_ITEM_SPACING_X, 24, MENU_FRAME_COLOR, '-');
+    MENU_HOST__Draw_DrawString(16, 24, MENU_FRAME_COLOR, g_MENURail);
     MENU_HOST__Draw_DrawString(222, 24, MENU_FRAME_COLOR, g_MENUPlus);
     MENU_HOST__Draw_DrawString(20, 16, COLOR_WHITE, title);
 }
@@ -780,43 +717,6 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_DrawItem(
         MENU_HOST__Draw_DrawString(15, y, COLOR_GRAY, g_MENUUnselected);
         MENU_HOST__Draw_DrawString(35, y, color, title);
     }
-}
-
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_Draw(u32 first, u32 selected, u32 total)
-{
-    const char *titles[MENU_VISIBLE_ITEMS];
-    u32 colors[MENU_VISIBLE_ITEMS];
-    u32 shown = PLUGIN_MENU_SnapshotItems(first, titles, colors);
-
-    MENU_HOST__Draw_Lock();
-    MENU_HOST__Draw_ClearFramebuffer();
-    PLUGIN_MENU_DrawFrame(g_MENUEntryTitle);
-
-    if (first)
-        MENU_HOST__Draw_DrawString(35, MENU_TOP_DOTS_Y, COLOR_GRAY, g_MENUDots);
-
-    for (u32 i = 0; i < shown; i++)
-    {
-        PLUGIN_MENU_DrawItem(
-            MENU_ITEM_TOP_Y + i * MENU_ITEM_SPACING_Y,
-            first + i == selected,
-            titles[i],
-            colors[i]
-        );
-    }
-
-    if (first + shown < total)
-    {
-        MENU_HOST__Draw_DrawString(
-            35,
-            MENU_ITEM_TOP_Y + MENU_VISIBLE_ITEMS * MENU_ITEM_SPACING_Y,
-            COLOR_GRAY,
-            g_MENUDots
-        );
-    }
-
-    MENU_HOST__Draw_FlushFramebuffer();
-    MENU_HOST__Draw_Unlock();
 }
 
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_RedrawSelection(
@@ -848,76 +748,120 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_RedrawSelection(
     MENU_HOST__Draw_Unlock();
 }
 
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_ClearForCallback(void)
-{
-    MENU_HOST__Draw_Lock();
-    MENU_HOST__Draw_ClearFramebuffer();
-    MENU_HOST__Draw_FlushFramebuffer();
-    MENU_HOST__Draw_Unlock();
-}
-
 #include "modmenu_online.c"
 #include "modmenu_manage.c"
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_Open(void)
 {
-    if (g_MENUUnread)
+    if (g_MENUUnread && g_MENUHasExpectedEnv)
     {
-        g_MENUUnread = false;
-        (void)PLUGIN_MENU_SaveSeenState();
+        PluginMenuSeenState state;
+        state.expectedEnvLo = (u32) PLUGIN_MENU_expectedEnv;
+        state.expectedEnvHi = (u32) (PLUGIN_MENU_expectedEnv >> 32);
+        if (PLUGIN_MENU_SaveData(MENU_PLUGIN_ID, &state, sizeof(state)))
+            g_MENUUnread = false;
     }
-
     u32 selected = 0;
     u32 first = 0;
     u32 drawnCount = 0;
     u32 drawnGeneration = 0;
     bool fullRedraw = true;
     g_MENUInsideMenu = true;
-
     for (;;)
     {
         u32 count;
         u32 generation;
-        PLUGIN_MENU_GetRegistryState(&count, &generation);
+        PLUGIN_MENU_LockWord(&g_MENURegistryLock);
+        count = g_MENUItemCount;
+        generation = g_MENURegistryGeneration;
+        PLUGIN_MENU_UnlockWord(&g_MENURegistryLock);
         if (!count || MENU_HOST__menuShouldExit)
             break;
-
         if (selected >= count)
             selected = count - 1u;
-
         if (count <= MENU_VISIBLE_ITEMS)
             first = 0;
         else
         {
             if (first > selected)
                 first = selected;
-            if (selected >= first + MENU_VISIBLE_ITEMS)
+            if (selected >= (first + MENU_VISIBLE_ITEMS))
                 first = selected - MENU_VISIBLE_ITEMS + 1u;
-            if (first > count - MENU_VISIBLE_ITEMS)
+            if (first > (count - MENU_VISIBLE_ITEMS))
                 first = count - MENU_VISIBLE_ITEMS;
         }
-
         if (count != drawnCount || generation != drawnGeneration)
             fullRedraw = true;
-
         if (fullRedraw)
         {
-            PLUGIN_MENU_Draw(first, selected, count);
+            {
+                u32 drawTotal = count;
+                const char *titles[MENU_VISIBLE_ITEMS];
+                u32 colors[MENU_VISIBLE_ITEMS];
+                bool hasSyspluginItems;
+                u32 shown;
+                {
+                    const char **snapshotItemsTitles = titles;
+                    u32 *snapshotItemsColors = colors;
+                    PLUGIN_MENU_LockWord(&g_MENURegistryLock);
+                    hasSyspluginItems = false;
+                    u32 count = 0;
+                    u32 index = 0;
+                    for (PluginMenuRegistration *item = g_MENUFirstItem; item; item = item->next, index++)
+                    {
+                        if (item != &g_MENUManageItem && item != &g_MENUOnlineItem)
+                            hasSyspluginItems = true;
+                        if (index >= first && count < MENU_VISIBLE_ITEMS)
+                        {
+                            snapshotItemsTitles[count] = item->title;
+                            snapshotItemsColors[count] = item->color;
+                            count++;
+                        }
+                    }
+
+                    PLUGIN_MENU_UnlockWord(&g_MENURegistryLock);
+                    shown = count;
+                }
+                MENU_HOST__Draw_Lock();
+                MENU_HOST__Draw_ClearFramebuffer();
+                PLUGIN_MENU_DrawFrame(g_MENUEntryTitle);
+                if (first)
+                    MENU_HOST__Draw_DrawString(35, MENU_TOP_DOTS_Y, COLOR_GRAY, g_MENUDots);
+                for (u32 i = 0; i < shown; i++)
+                {
+                    PLUGIN_MENU_DrawItem(MENU_ITEM_TOP_Y + i * MENU_ITEM_SPACING_Y, (first + i) == selected, titles[i], colors[i]);
+                }
+
+                if ((first + shown) < drawTotal)
+                {
+                    MENU_HOST__Draw_DrawString(35, MENU_ITEM_TOP_Y + MENU_VISIBLE_ITEMS * MENU_ITEM_SPACING_Y, COLOR_GRAY, g_MENUDots);
+                }
+                if (!hasSyspluginItems)
+                    MENU_HOST__Draw_DrawString(35, 89, COLOR_GRAY, g_MENUEmptyText);
+                MENU_HOST__Draw_FlushFramebuffer();
+                MENU_HOST__Draw_Unlock();
+            }
             drawnCount = count;
             drawnGeneration = generation;
             fullRedraw = false;
         }
-
         u32 pressed = MENU_HOST__waitInput();
-
         if (MENU_HOST__menuShouldExit)
             break;
-
         if (pressed & KEY_A)
         {
-            void (*callback)(void) = PLUGIN_MENU_GetCallback(selected);
+            PLUGIN_MENU_LockWord(&g_MENURegistryLock);
+            PluginMenuRegistration *item = g_MENUFirstItem;
+            for (u32 i = 0; item && i < selected; i++)
+                item = item->next;
+
+            void (*callback)(void) = (item) ? (item->callback) : (NULL);
+            PLUGIN_MENU_UnlockWord(&g_MENURegistryLock);
             if (callback)
             {
-                PLUGIN_MENU_ClearForCallback();
+                MENU_HOST__Draw_Lock();
+                MENU_HOST__Draw_ClearFramebuffer();
+                MENU_HOST__Draw_FlushFramebuffer();
+                MENU_HOST__Draw_Unlock();
                 callback();
                 fullRedraw = true;
             }
@@ -930,8 +874,7 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_Open(void)
         {
             u32 oldSelected = selected;
             u32 oldFirst = first;
-
-            if (selected + 1u >= count)
+            if ((selected + 1u) >= count)
             {
                 selected = 0;
                 first = 0;
@@ -939,10 +882,9 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_Open(void)
             else
             {
                 selected++;
-                if (selected >= first + MENU_VISIBLE_ITEMS)
+                if (selected >= (first + MENU_VISIBLE_ITEMS))
                     first++;
             }
-
             if (first != oldFirst)
                 fullRedraw = true;
             else if (selected != oldSelected)
@@ -952,11 +894,10 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_Open(void)
         {
             u32 oldSelected = selected;
             u32 oldFirst = first;
-
             if (!selected)
             {
                 selected = count - 1u;
-                first = count > MENU_VISIBLE_ITEMS ? count - MENU_VISIBLE_ITEMS : 0;
+                first = (count > MENU_VISIBLE_ITEMS) ? (count - MENU_VISIBLE_ITEMS) : (0);
             }
             else
             {
@@ -964,7 +905,6 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_Open(void)
                 if (selected < first)
                     first--;
             }
-
             if (first != oldFirst)
                 fullRedraw = true;
             else if (selected != oldSelected)
@@ -986,46 +926,6 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_CopyMenuItem(MenuItem *dst, const Menu
     dst->visibility = src->visibility;
 }
 
-// put one entry in Rosalina's root menu
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_InsertRootItem(void)
-{
-    Menu *root = MENU_HOST__rosalinaMenu;
-    u32 count = 0;
-
-    while (count < MENU_MAX_HOST_ITEMS && root->items[count].action_type != MENU_END)
-        count++;
-
-    if (count >= MENU_MAX_HOST_ITEMS - 1u)
-        return false;
-
-    u32 index = MENU_MAX_HOST_ITEMS;
-    for (u32 i = 0; i < count; i++)
-    {
-        if (root->items[i].action_type == MENU &&
-            root->items[i].menu == MENU_HOST__miscellaneousMenu)
-        {
-            index = i;
-            break;
-        }
-    }
-
-    if (index == MENU_MAX_HOST_ITEMS)
-        return false;
-
-    for (u32 i = count + 1u; i > index; i--)
-        PLUGIN_MENU_CopyMenuItem(&root->items[i], &root->items[i - 1u]);
-
-    root->items[index].title = g_MENUEntryTitle;
-    root->items[index].action_type = METHOD;
-    root->items[index].method = PLUGIN_MENU_Open;
-    root->items[index].visibility = NULL;
-
-    g_MENURootInserted = true;
-    g_MENURootIndex = index;
-    g_MENURootOriginalCount = count;
-    return true;
-}
-
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_RemoveRootItem(void)
 {
     if (!g_MENURootInserted)
@@ -1042,31 +942,9 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_RemoveRootItem(void)
     g_MENURootInserted = false;
 }
 
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_SetupItems(void)
-{
-    if (!PLUGIN_MENU_AppendInternal(
-            &g_MENUManageItem,
-            MENU_PLUGIN_ID,
-            g_MENUManageItemTitle,
-            PLUGIN_MENU_Manage,
-            COLOR_WHITE))
-    {
-        return false;
-    }
-
-    return PLUGIN_MENU_AppendInternal(
-        &g_MENUOnlineItem,
-        MENU_PLUGIN_ID,
-        g_MENUOnlineItemTitle,
-        PLUGIN_MENU_OpenOnlineMenu,
-        COLOR_WHITE
-    );
-}
-
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_ResetRegistry(void)
 {
-    PLUGIN_MENU_LockRegistry();
-
+    PLUGIN_MENU_LockWord(&g_MENURegistryLock);
     PluginMenuRegistration *item = g_MENUFirstItem;
     while (item)
     {
@@ -1083,36 +961,150 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_ResetRegistry(void)
     g_MENULastItem = NULL;
     g_MENUItemCount = 0;
     g_MENURegistryGeneration++;
-    PLUGIN_MENU_UnlockRegistry();
+    PLUGIN_MENU_UnlockWord(&g_MENURegistryLock);
 }
 
 PLUGIN_MAIN(MENU) bool PLUGIN_MENU_Main(void)
 {
-    PLUGIN_MENU_ManageResetTempList();
-    PLUGIN_MENU_ManageCaptureBootSnapshot();
+    g_MENUManageChangeSize = 0;
+    {
+        g_MENUBootSelf.found = false;
+        g_MENUBootSelf.entryOffset = 0;
+        g_MENUBootSelf.metadataOffset = 0;
+        g_MENUBootSelf.metadataSize = 0;
+        g_MENUBootSelf.expectedEnvLo = 0;
+        g_MENUBootSelf.expectedEnvHi = 0;
+        if (!PLUGIN_MENU_ManageAllocScratch())
+            goto bootSnapshotDone2;
+        g_MENUManageCapturingBoot = true;
+        g_MENUManageChangeSize = 0;
+        bool bootSnapshotCondition = !PLUGIN_MENU_ManageBuildList() != 0;
+        if (!bootSnapshotCondition)
+        {
+            bool bootSnapshotResult;
+            {
+                u32 size = 0;
+                for (u32 i = 0; i < g_MENUManageFileCount; i++)
+                {
+                    PluginMenuManageFile *item = &g_MENUManageFiles[i];
+                    const char *name;
+                    u32 length;
+                    if (item->currentDisabled)
+                        continue;
+                    name = PLUGIN_MENU_ManageName(item);
+                    length = PLUGIN_MENU_StringLength(name);
+                    if ((size + length + 1u) > MENU_MANAGE_TEMP_BYTES)
+                    {
+                        bootSnapshotResult = false;
+                        goto bootSnapshotDone;
+                    }
+                    for (u32 j = 0; j < length; j++)
+                        g_MENUManageChanges[size++] = name[j];
 
-    if (!PLUGIN_MENU_SetupItems())
+                    g_MENUManageChanges[size++] = '\n';
+                }
+
+                g_MENUManageChangeSize = size;
+                {
+                    bootSnapshotResult = PLUGIN_MENU_ManageSaveExact(g_MENUManageChanges, g_MENUManageChangeSize);
+                }
+                bootSnapshotDone:;
+
+            }
+            bootSnapshotCondition = !bootSnapshotResult != 0;
+        }
+        if (bootSnapshotCondition)
+            (void) PLUGIN_MENU_ManageSaveExact(NULL, 0);
+        g_MENUManageCapturingBoot = false;
+        PLUGIN_MENU_ManageFreeScratch();
+        bootSnapshotDone2:;
+
+    }
+    bool setupItemsResult;
+    {
+        if (!PLUGIN_MENU_AppendInternal(&g_MENUManageItem, MENU_PLUGIN_ID, g_MENUManageItemTitle, PLUGIN_MENU_Manage, COLOR_WHITE))
+        {
+            {
+                setupItemsResult = false;
+                goto setupItemsDone;
+            }
+        }
+        setupItemsResult = PLUGIN_MENU_AppendInternal(&g_MENUOnlineItem, MENU_PLUGIN_ID, g_MENUOnlineItemTitle, PLUGIN_MENU_OpenOnlineMenu, COLOR_WHITE);
+        setupItemsDone:;
+
+    }
+    if (!setupItemsResult)
     {
         PLUGIN_MENU_ResetRegistry();
         return false;
     }
-
-    PLUGIN_MENU_LoadSeenState();
+    g_MENUUnread = true;
+    g_MENUHasExpectedEnv = false;
+    PLUGIN_MENU_expectedEnv = 0;
+    if (g_MENUBootSelf.found && (g_MENUBootSelf.expectedEnvLo || g_MENUBootSelf.expectedEnvHi))
+    {
+        u32 expectedEnvLo = g_MENUBootSelf.expectedEnvLo & ~1u;
+        PLUGIN_MENU_expectedEnv = ((u64) g_MENUBootSelf.expectedEnvHi << 32) | expectedEnvLo;
+        g_MENUHasExpectedEnv = true;
+        PluginMenuSeenState state;
+        if (PLUGIN_MENU_LoadData(MENU_PLUGIN_ID, &state, sizeof(state)) && state.expectedEnvLo == (u32) PLUGIN_MENU_expectedEnv && state.expectedEnvHi == (u32) (PLUGIN_MENU_expectedEnv >> 32))
+        {
+            g_MENUUnread = false;
+        }
+    }
     g_MENUHttpsReady = false;
+    bool rootItemResult;
+    {
+        Menu *root = MENU_HOST__rosalinaMenu;
+        u32 count = 0;
+        while (count < MENU_MAX_HOST_ITEMS && root->items[count].action_type != MENU_END)
+            count++;
 
-    if (!PLUGIN_MENU_InsertRootItem())
+        if (count >= (MENU_MAX_HOST_ITEMS - 1u))
+        {
+            rootItemResult = false;
+            goto rootItemDone;
+        }
+        u32 index = MENU_MAX_HOST_ITEMS;
+        for (u32 i = 0; i < count; i++)
+        {
+            if (root->items[i].action_type == MENU && root->items[i].menu == MENU_HOST__miscellaneousMenu)
+            {
+                index = i;
+                break;
+            }
+        }
+
+        if (index == MENU_MAX_HOST_ITEMS)
+        {
+            rootItemResult = false;
+            goto rootItemDone;
+        }
+        for (u32 i = count + 1u; i > index; i--)
+            PLUGIN_MENU_CopyMenuItem(&root->items[i], &root->items[i - 1u]);
+
+        root->items[index].title = g_MENUEntryTitle;
+        root->items[index].action_type = METHOD;
+        root->items[index].method = PLUGIN_MENU_Open;
+        root->items[index].visibility = NULL;
+        g_MENURootInserted = true;
+        g_MENURootIndex = index;
+        g_MENURootOriginalCount = count;
+        rootItemResult = true;
+        rootItemDone:;
+
+    }
+    if (!rootItemResult)
     {
         PLUGIN_MENU_ResetRegistry();
         return false;
     }
-
     if (!PLUGIN_MENU_InstallBridgeHook())
     {
         PLUGIN_MENU_RemoveRootItem();
         PLUGIN_MENU_ResetRegistry();
         return false;
     }
-
     // draw hook stays last because it has no unload-time rollback path.
     if (!PLUGIN_MENU_InstallDrawStringHook())
     {
@@ -1125,7 +1117,6 @@ PLUGIN_MAIN(MENU) bool PLUGIN_MENU_Main(void)
         // Failed bridge rollback leaves a host branch into this image, so stay resident.
         return true;
     }
-
     return true;
 }
 #undef MENU_MODMENU_SOURCE

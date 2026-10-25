@@ -119,51 +119,6 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_OnlineReadExact(
     return R_SUCCEEDED(MENU_HOST__FSFILE_Read(file, &read, offset, buffer, size)) && read == size;
 }
 
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_OnlineResolveTransientLayout(
-    Handle file,
-    u32 fileSize,
-    const MENUTransientHeader *header,
-    u32 *headerSize
-)
-{
-    u32 end;
-    u32 metadataOffset;
-    u32 total;
-    u32 metadataSize = 0;
-
-    if (!header || !headerSize)
-        return false;
-
-    if (fileSize >= 0x30u &&
-        PLUGIN_MENU_OnlineReadExact(file, 0x2Cu, &metadataSize, sizeof(metadataSize)) &&
-        metadataSize >= 8u &&
-        (metadataSize & 0xFu) == 0 &&
-        PLUGIN_MENU_OnlineAdd32(0x30u, header->fastRelocSize, &end) &&
-        PLUGIN_MENU_OnlineAdd32(end, header->codeSize, &end) &&
-        PLUGIN_MENU_OnlineAdd32(end, header->dataSize, &end) &&
-        PLUGIN_MENU_OnlineAdd32(end, header->repairSize, &end) &&
-        PLUGIN_MENU_OnlineAlign16(end, &metadataOffset) &&
-        PLUGIN_MENU_OnlineAdd32(metadataOffset, metadataSize, &total) &&
-        total == fileSize)
-    {
-        *headerSize = 0x30u;
-        return true;
-    }
-
-    if (PLUGIN_MENU_OnlineAdd32(MENU_TRANSIENT_HEADER_SIZE, header->fastRelocSize, &end) &&
-        PLUGIN_MENU_OnlineAdd32(end, header->codeSize, &end) &&
-        PLUGIN_MENU_OnlineAdd32(end, header->dataSize, &end) &&
-        PLUGIN_MENU_OnlineAdd32(end, header->repairSize, &end) &&
-        PLUGIN_MENU_OnlineAlign16(end, &total) &&
-        total == fileSize)
-    {
-        *headerSize = MENU_TRANSIENT_HEADER_SIZE;
-        return true;
-    }
-
-    return false;
-}
-
 PLUGIN_CODE(MENU) bool PLUGIN_MENU_FindFreeRange(u32 size, u32 *outBase)
 {
     u32 scan = MENU_TRANSIENT_LOW;
@@ -259,87 +214,6 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_FetchFreeScratch(void)
     g_MENUFetchEditSources = NULL;
 }
 
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ScanAllocScratch(void)
-{
-    u32 base = 0;
-    if (g_MENUScanScratch)
-        return true;
-    if (!PLUGIN_MENU_TempAlloc(0x1000u, &base))
-        return false;
-    g_MENUScanScratch = (PluginMenuScanScratch *)base;
-    return true;
-}
-
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_ScanFreeScratch(void)
-{
-    if (g_MENUScanScratch)
-        PLUGIN_MENU_TempFree((u32)g_MENUScanScratch, 0x1000u);
-    g_MENUScanScratch = NULL;
-}
-
-
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_OnlineValidateRepair(
-    Handle file,
-    u32 repairOffset,
-    u32 repairSize
-)
-{
-    u32 exportCount;
-    u32 exportBytes;
-
-    if (repairSize < 4u || !PLUGIN_MENU_OnlineReadExact(file, repairOffset, &exportCount, 4u))
-        return false;
-    if (!PLUGIN_MENU_OnlineMul32(exportCount, 12u, &exportBytes))
-        return false;
-    return exportBytes == repairSize - 4u;
-}
-
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_OnlineApplyRelocs(
-    Handle file,
-    u32 relocOffset,
-    u32 relocSize,
-    u32 expectedId,
-    u32 runtimeBase,
-    u32 runtimeSize
-)
-{
-    u32 cursor = 0;
-
-    while (cursor < relocSize)
-    {
-        u32 group[2];
-        u32 pairBytes;
-
-        if (relocSize - cursor < 8u ||
-            !PLUGIN_MENU_OnlineReadExact(file, relocOffset + cursor, group, 8u) ||
-            group[0] != expectedId ||
-            !PLUGIN_MENU_OnlineMul32(group[1], 8u, &pairBytes) ||
-            pairBytes > relocSize - cursor - 8u)
-        {
-            return false;
-        }
-
-        cursor += 8u;
-        for (u32 i = 0; i < group[1]; i++)
-        {
-            u32 pair[2];
-
-            if (!PLUGIN_MENU_OnlineReadExact(file, relocOffset + cursor, pair, 8u) ||
-                (pair[0] & 3u) ||
-                pair[0] > runtimeSize - 4u ||
-                pair[1] >= runtimeSize)
-            {
-                return false;
-            }
-
-            *(volatile u32 *)(runtimeBase + pair[0]) = runtimeBase + pair[1];
-            cursor += 8u;
-        }
-    }
-
-    return cursor == relocSize;
-}
-
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_OnlineFree(MENUTransientImage *image)
 {
     if (!image || !image->base)
@@ -360,192 +234,9 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_OnlineSetFailure(const char *stage, Re
     u32 value = (u32)result;
 
     g_MENUOnlineLastStage = stage;
-    g_MENUOnlineLastResult = result;
     for (u32 i = 0; i < 8; i++)
         g_MENUOnlineResultHex[i] = g_MENUOnlineHexDigits[(value >> ((7u - i) * 4u)) & 0xFu];
     g_MENUOnlineResultHex[8] = 0;
-}
-
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_LoadTransient(
-    const char *path,
-    u32 expectedId,
-    const char *openStage,
-    MENUTransientImage *image
-)
-{
-    FS_Archive archive = 0;
-    Handle file = 0;
-    MENUTransientHeader header;
-    u64 fileSize64 = 0;
-    u32 fileEnd;
-    u32 payloadHeaderSize;
-    u32 codeOffset;
-    u32 dataOffset;
-    u32 repairOffset;
-    u32 codeSize;
-    u32 dataAndBssSize;
-    u32 dataSize;
-    u32 totalSize;
-    u32 base = 0;
-    u32 dataAddress;
-    bool archiveOpen = false;
-    bool fileOpen = false;
-    bool memoryAllocated = false;
-
-    if (!image)
-        return false;
-    image->base = 0;
-    image->codeSize = 0;
-    image->totalSize = 0;
-    image->codeProtected = false;
-
-    {
-        Result result = MENU_HOST__FSUSER_OpenArchive(
-            &archive,
-            ARCHIVE_SDMC,
-            MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath));
-        if (R_FAILED(result))
-        {
-            PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageOpenArchive, result);
-            goto fail;
-        }
-    }
-    archiveOpen = true;
-
-    {
-        Result result = MENU_HOST__FSUSER_OpenFile(
-            &file,
-            archive,
-            MENU_HOST__fsMakePath(PATH_ASCII, path),
-            FS_OPEN_READ,
-            0);
-        if (R_FAILED(result))
-        {
-            PLUGIN_MENU_OnlineSetFailure(openStage, result);
-            goto fail;
-        }
-    }
-    fileOpen = true;
-
-    if (R_FAILED(MENU_HOST__FSFILE_GetSize(file, &fileSize64)) ||
-        fileSize64 < MENU_TRANSIENT_HEADER_SIZE ||
-        fileSize64 > MENU_TRANSIENT_MAX_FILE_SIZE ||
-        !PLUGIN_MENU_OnlineReadExact(file, 0, &header, sizeof(header)) ||
-        header.magic != MENU_TRANSIENT_MAGIC ||
-        header.plgid != expectedId ||
-        !header.codeSize ||
-        !PLUGIN_MENU_OnlineResolveTransientLayout(file, (u32)fileSize64, &header, &payloadHeaderSize) ||
-        !PLUGIN_MENU_OnlineAdd32(payloadHeaderSize, header.fastRelocSize, &codeOffset) ||
-        !PLUGIN_MENU_OnlineAdd32(codeOffset, header.codeSize, &dataOffset) ||
-        !PLUGIN_MENU_OnlineAdd32(dataOffset, header.dataSize, &repairOffset) ||
-        !PLUGIN_MENU_OnlineAdd32(repairOffset, header.repairSize, &fileEnd) ||
-        fileEnd > (u32)fileSize64 ||
-        !PLUGIN_MENU_OnlineAlignPage(header.codeSize, &codeSize) ||
-        !PLUGIN_MENU_OnlineAdd32(header.dataSize, header.bssSize, &dataAndBssSize) ||
-        !PLUGIN_MENU_OnlineAlignPage(dataAndBssSize, &dataSize) ||
-        !PLUGIN_MENU_OnlineAdd32(codeSize, dataSize, &totalSize) ||
-        !totalSize ||
-        totalSize > MENU_TRANSIENT_MAX_RUNTIME_SIZE ||
-        !PLUGIN_MENU_OnlineValidateRepair(file, repairOffset, header.repairSize))
-    {
-        PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageValidate, (Result)0xD8A0A046u);
-        goto fail;
-    }
-
-    if (!PLUGIN_MENU_TempAlloc(totalSize, &base))
-    {
-        PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageAllocate, (Result)0xD8A0A047u);
-        goto fail;
-    }
-    memoryAllocated = true;
-    dataAddress = base + codeSize;
-
-    if (!PLUGIN_MENU_OnlineReadExact(file, codeOffset, (void *)base, header.codeSize) ||
-        (header.dataSize && !PLUGIN_MENU_OnlineReadExact(file, dataOffset, (void *)dataAddress, header.dataSize)))
-    {
-        PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageRead, (Result)0xD8A0A048u);
-        goto fail;
-    }
-
-    for (u32 i = 0; i < header.bssSize; i++)
-        *(volatile u8 *)(dataAddress + header.dataSize + i) = 0;
-
-    if (!PLUGIN_MENU_OnlineApplyRelocs(
-            file,
-            payloadHeaderSize,
-            header.fastRelocSize,
-            expectedId,
-            base,
-            totalSize))
-    {
-        PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageRelocate, (Result)0xD8A0A049u);
-        goto fail;
-    }
-
-    MENU_HOST__FSFILE_Close(file);
-    file = 0;
-    fileOpen = false;
-    MENU_HOST__FSUSER_CloseArchive(archive);
-    archive = 0;
-    archiveOpen = false;
-
-    MENU_HOST__svcFlushEntireDataCache();
-    {
-        Result result = PLUGIN_MENU_OnlineProtect(base, codeSize, MEMPERM_READEXECUTE);
-        if (R_FAILED(result))
-        {
-            PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageProtect, result);
-            goto fail;
-        }
-    }
-    MENU_HOST__svcInvalidateEntireInstructionCache();
-
-    image->base = base;
-    image->codeSize = codeSize;
-    image->totalSize = totalSize;
-    image->codeProtected = true;
-    return true;
-
-fail:
-    if (fileOpen)
-        MENU_HOST__FSFILE_Close(file);
-    if (archiveOpen)
-        MENU_HOST__FSUSER_CloseArchive(archive);
-    if (memoryAllocated)
-    {
-        MENUTransientImage temporary = { base, codeSize, totalSize, false };
-        PLUGIN_MENU_OnlineFree(&temporary);
-    }
-    return false;
-}
-
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_GetHttpsVersion(FS_Archive archive, u32 *version)
-{
-    Handle file = 0;
-    u32 header[12];
-    u32 offset, end;
-    u32 versionWords[2];
-    u64 fileSize = 0;
-    bool ok = false;
-    if (!version || R_FAILED(MENU_HOST__FSUSER_OpenFile(&file, archive,
-            MENU_HOST__fsMakePath(PATH_ASCII, g_MENUHttpsPath), FS_OPEN_READ, 0)))
-        return false;
-    if (R_SUCCEEDED(MENU_HOST__FSFILE_GetSize(file, &fileSize)) && fileSize >= 0x30u &&
-        fileSize <= MENU_TRANSIENT_MAX_FILE_SIZE &&
-        PLUGIN_MENU_OnlineReadExact(file, 0, header, sizeof(header)) &&
-        header[0] == MENU_TRANSIENT_MAGIC && header[1] == MENU_HTTPS_ID && header[2] &&
-        header[11] >= 8u && !(header[11] & 0xFu) &&
-        PLUGIN_MENU_OnlineAdd32(0x30u, header[5], &end) &&
-        PLUGIN_MENU_OnlineAdd32(end, header[2], &end) &&
-        PLUGIN_MENU_OnlineAdd32(end, header[3], &end) &&
-        PLUGIN_MENU_OnlineAdd32(end, header[6], &end) &&
-        PLUGIN_MENU_OnlineAlign16(end, &offset) &&
-        PLUGIN_MENU_OnlineAdd32(offset, header[11], &end) && end == (u32)fileSize &&
-        PLUGIN_MENU_OnlineReadExact(file, offset, versionWords, sizeof(versionWords)) &&
-        versionWords[0] == MENU_3ON_VERSION_MAGIC)
-    { *version = versionWords[1]; ok = true; }
-    MENU_HOST__FSFILE_Close(file);
-    return ok;
 }
 
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_CompressedGetByte(
@@ -603,96 +294,57 @@ PLUGIN_CODE(MENU) Result PLUGIN_MENU_ExtractRawFile(
     u64 sourceFileSize = 0;
     u32 copied = 0;
     Result result = 0;
-
-    if (!source || !source->file || !source->archive || !outputPath || !outputPath[0] ||
-        !PLUGIN_MENU_Add32(sourceOffset, sourceSize, &sourceEnd) ||
-        R_FAILED(MENU_HOST__FSFILE_GetSize(source->file, &sourceFileSize)) ||
-        sourceEnd > sourceFileSize)
+    if (!source || !source->file || !source->archive || !outputPath || !outputPath[0] || !PLUGIN_MENU_Add32(sourceOffset, sourceSize, &sourceEnd) || R_FAILED(MENU_HOST__FSFILE_GetSize(source->file, &sourceFileSize)) || sourceEnd > sourceFileSize)
     {
-        return (Result)0xD8A0A06Au;
+        return (Result) 0xD8A0A06Au;
     }
-
     if (sourceSize && !PLUGIN_MENU_TempAlloc(0x10000u, &scratchBase))
-        return (Result)0xD8A0A06Bu;
-    scratch = (u8 *)scratchBase;
-
+        return (Result) 0xD8A0A06Bu;
+    scratch = (u8 *) scratchBase;
     // don't edit sources while an extract is using them
-    PLUGIN_MENU_LockFetch();
-
-    (void)MENU_HOST__FSUSER_DeleteFile(
-        source->archive,
-        MENU_HOST__fsMakePath(PATH_ASCII, outputPath)
-    );
-
-    result = MENU_HOST__FSUSER_OpenFile(
-        &outputFile,
-        source->archive,
-        MENU_HOST__fsMakePath(PATH_ASCII, outputPath),
-        FS_OPEN_WRITE | FS_OPEN_CREATE,
-        0
-    );
+    PLUGIN_MENU_LockWord(&g_MENUFetchLock);
+    (void) MENU_HOST__FSUSER_DeleteFile(source->archive, MENU_HOST__fsMakePath(PATH_ASCII, outputPath));
+    result = MENU_HOST__FSUSER_OpenFile(&outputFile, source->archive, MENU_HOST__fsMakePath(PATH_ASCII, outputPath), FS_OPEN_WRITE | FS_OPEN_CREATE, 0);
     if (R_FAILED(result))
         goto done;
-
     result = MENU_HOST__FSFILE_SetSize(outputFile, sourceSize);
     if (R_FAILED(result))
         goto done;
-
     while (copied < sourceSize)
     {
         u32 chunk = sourceSize - copied;
         u32 read = 0;
         u32 written = 0;
         u32 flags;
-
         if (chunk > 0x10000u)
             chunk = 0x10000u;
-
-        result = MENU_HOST__FSFILE_Read(
-            source->file,
-            &read,
-            sourceOffset + copied,
-            scratch,
-            chunk
-        );
+        result = MENU_HOST__FSFILE_Read(source->file, &read, sourceOffset + copied, scratch, chunk);
         if (R_FAILED(result) || read != chunk)
         {
-            result = R_FAILED(result) ? result : (Result)0xD8A0A06Cu;
+            result = (R_FAILED(result)) ? (result) : ((Result) 0xD8A0A06Cu);
             goto done;
         }
-
-        flags = copied + chunk == sourceSize ? FS_WRITE_FLUSH : 0;
-        result = MENU_HOST__FSFILE_Write(
-            outputFile,
-            &written,
-            copied,
-            scratch,
-            chunk,
-            flags
-        );
+        flags = ((copied + chunk) == sourceSize) ? (FS_WRITE_FLUSH) : (0);
+        result = MENU_HOST__FSFILE_Write(outputFile, &written, copied, scratch, chunk, flags);
         if (R_FAILED(result) || written != chunk)
         {
-            result = R_FAILED(result) ? result : (Result)0xD8A0A06Du;
+            result = (R_FAILED(result)) ? (result) : ((Result) 0xD8A0A06Du);
             goto done;
         }
-
         copied += chunk;
         if (!flags)
             MENU_HOST__svcSleepThread(1000000LL);
     }
 
-done:
+    done:
     if (outputFile)
         MENU_HOST__FSFILE_Close(outputFile);
+
     if (R_FAILED(result))
     {
-        (void)MENU_HOST__FSUSER_DeleteFile(
-            source->archive,
-            MENU_HOST__fsMakePath(PATH_ASCII, outputPath)
-        );
+        (void) MENU_HOST__FSUSER_DeleteFile(source->archive, MENU_HOST__fsMakePath(PATH_ASCII, outputPath));
     }
-
-    PLUGIN_MENU_UnlockFetch();
+    PLUGIN_MENU_UnlockWord(&g_MENUFetchLock);
     if (scratchBase)
         PLUGIN_MENU_TempFree(scratchBase, 0x10000u);
     return result;
@@ -735,7 +387,7 @@ PLUGIN_CODE(MENU) Result PLUGIN_MENU_UnpackLz10File(
     flush = history + 0x2000u;
 
     // don't edit sources while an unpack is using them
-    PLUGIN_MENU_LockFetch();
+    PLUGIN_MENU_LockWord(&g_MENUFetchLock);
 
     reader.file = source->file;
     reader.offset = compressedOffset;
@@ -879,7 +531,7 @@ done:
         );
     }
 
-    PLUGIN_MENU_UnlockFetch();
+    PLUGIN_MENU_UnlockWord(&g_MENUFetchLock);
     PLUGIN_MENU_TempFree(scratchBase, 0x6000u);
     return result;
 }
@@ -894,74 +546,291 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_EnsureHttpslib(
     u32 installedVersion = 0;
     u32 compressedOffset;
     u32 compressedEnd;
-
-    if (!selfFile || !selfFile->file ||
-        selfFile->metadataSize < sizeof(selfVersion) + sizeof(compressed))
+    if (!selfFile || !selfFile->file || selfFile->metadataSize < (sizeof(selfVersion) + sizeof(compressed)))
     {
-        PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageValidate, (Result)0xD8A0A060u);
+        PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageValidate, (Result) 0xD8A0A060u);
         return false;
     }
-
-    if (!PLUGIN_MENU_OnlineReadExact(
-            selfFile->file,
-            selfFile->metadataOffset,
-            selfVersion,
-            sizeof(selfVersion)) ||
-        selfVersion[0] != MENU_3NX_VERSION_MAGIC ||
-        !PLUGIN_MENU_OnlineAdd32(selfFile->metadataOffset, sizeof(selfVersion), &compressedOffset) ||
-        !PLUGIN_MENU_OnlineReadExact(
-            selfFile->file,
-            compressedOffset,
-            &compressed,
-            sizeof(compressed)) ||
-        compressed.magic != MENU_HTTPS_COMPRESSED_MAGIC ||
-        !compressed.compressedSize ||
-        !PLUGIN_MENU_OnlineAdd32(compressedOffset, sizeof(compressed), &compressedOffset) ||
-        !PLUGIN_MENU_OnlineAdd32(compressedOffset, compressed.compressedSize, &compressedEnd) ||
-        compressedEnd > selfFile->metadataOffset + selfFile->metadataSize)
+    if (!PLUGIN_MENU_OnlineReadExact(selfFile->file, selfFile->metadataOffset, selfVersion, sizeof(selfVersion)) || selfVersion[0] != MENU_3NX_VERSION_MAGIC || !PLUGIN_MENU_OnlineAdd32(selfFile->metadataOffset, sizeof(selfVersion), &compressedOffset) || !PLUGIN_MENU_OnlineReadExact(selfFile->file, compressedOffset, &compressed, sizeof(compressed)) || compressed.magic != MENU_HTTPS_COMPRESSED_MAGIC || !compressed.compressedSize || !PLUGIN_MENU_OnlineAdd32(compressedOffset, sizeof(compressed), &compressedOffset) || !PLUGIN_MENU_OnlineAdd32(compressedOffset, compressed.compressedSize, &compressedEnd) || compressedEnd > (selfFile->metadataOffset + selfFile->metadataSize))
     {
-        PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageValidate, (Result)0xD8A0A061u);
+        PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageValidate, (Result) 0xD8A0A061u);
         return false;
     }
+    bool httpsVersionCondition = !forceRefresh != 0;
+    if (httpsVersionCondition)
+    {
+        bool httpsVersionResult;
+        {
+            FS_Archive httpsVersionArchive = selfFile->archive;
+            Handle file = 0;
+            u32 header[12];
+            u32 offset;
+            u32 end;
+            u32 versionWords[2];
+            u64 fileSize = 0;
+            bool ok = false;
+            if (R_FAILED(MENU_HOST__FSUSER_OpenFile(&file, httpsVersionArchive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUHttpsPath), FS_OPEN_READ, 0)) != 0)
+            {
+                httpsVersionResult = false;
+                goto httpsVersionDone;
+            }
+            if (R_SUCCEEDED(MENU_HOST__FSFILE_GetSize(file, &fileSize)) && fileSize >= 0x30u && fileSize <= MENU_TRANSIENT_MAX_FILE_SIZE && PLUGIN_MENU_OnlineReadExact(file, 0, header, sizeof(header)) && header[0] == MENU_TRANSIENT_MAGIC && header[1] == MENU_HTTPS_ID && header[2] && header[11] >= 8u && !(header[11] & 0xFu) && PLUGIN_MENU_OnlineAdd32(0x30u, header[5], &end) && PLUGIN_MENU_OnlineAdd32(end, header[2], &end) && PLUGIN_MENU_OnlineAdd32(end, header[3], &end) && PLUGIN_MENU_OnlineAdd32(end, header[6], &end) && PLUGIN_MENU_OnlineAlign16(end, &offset) && PLUGIN_MENU_OnlineAdd32(offset, header[11], &end) && end == (u32) fileSize && PLUGIN_MENU_OnlineReadExact(file, offset, versionWords, sizeof(versionWords)) && versionWords[0] == MENU_3ON_VERSION_MAGIC)
+            {
+                installedVersion = versionWords[1];
+                ok = true;
+            }
+            MENU_HOST__FSFILE_Close(file);
+            httpsVersionResult = ok;
+            httpsVersionDone:;
 
-    if (!forceRefresh &&
-        PLUGIN_MENU_GetHttpsVersion(selfFile->archive, &installedVersion) &&
-        installedVersion == compressed.version)
+        }
+        httpsVersionCondition = httpsVersionResult != 0;
+    }
+    if (httpsVersionCondition && installedVersion == compressed.version)
     {
         return true;
     }
-
-    Result result = PLUGIN_MENU_UnpackLz10File(
-        selfFile,
-        compressedOffset,
-        compressed.compressedSize,
-        g_MENUHttpsPath
-    );
-
+    Result result = PLUGIN_MENU_UnpackLz10File(selfFile, compressedOffset, compressed.compressedSize, g_MENUHttpsPath);
     if (R_FAILED(result))
     {
-        if (result == (Result)0xD8A0A063u)
+        if (result == (Result) 0xD8A0A063u)
             PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageHttpsRead, result);
-        else if (result == (Result)0xD8A0A064u || result == (Result)0xD8A0A065u ||
-                 result == (Result)0xD8A0A062u)
+        else if (result == (Result) 0xD8A0A064u || result == (Result) 0xD8A0A065u || result == (Result) 0xD8A0A062u)
             PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageHttpsDecode, result);
         else
             PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageHttpsWrite, result);
         return false;
     }
-
     return true;
 }
 
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_LoadHttpsLibrary(MENUTransientImage *image)
 {
     MENUHttpsApi api;
-    if(!PLUGIN_MENU_LoadTransient(g_MENUHttpsPath,MENU_HTTPS_ID,g_MENUOnlineStageOpenHttps,image))return false;
-    g_MENUHttpsHostApi.version=MENU_HTTPS_HOST_API_VERSION;g_MENUHttpsHostApi.hostTable=pluginTable_MENU;g_MENUHttpsHostApi.protectMemory=PLUGIN_MENU_OnlineProtect;g_MENUHttpsHostApi.addSysplugin=PLUGIN_MENU_AddSysplugin;g_MENUHttpsHostApi.disableSysplugin=PLUGIN_MENU_DisableSysplugin;g_MENUHttpsHostApi.enableSysplugin=PLUGIN_MENU_EnableSysplugin;g_MENUHttpsHostApi.deleteSysplugin=PLUGIN_MENU_DeleteSysplugin;
-    api.version=0;api.downloadToFile=NULL;api.downloadToMemory=NULL;api.openOnlineMenu=NULL;api.openOnlineSource=NULL;
-    bool ok=((bool(*)(const MENUHttpsHostApi*,MENUHttpsApi*))image->base)(&g_MENUHttpsHostApi,&api);
-    if(!ok||api.version!=MENU_HTTPS_API_VERSION||!api.downloadToFile||!api.downloadToMemory||!api.openOnlineMenu||!api.openOnlineSource){PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageInitHttps,(Result)0xD8A0A069u);PLUGIN_MENU_OnlineFree(image);return false;}
-    g_MENUHttpsOpenOnline=api.openOnlineMenu;g_MENUHttpsOpenOnlineSource=api.openOnlineSource;return true;
+    bool loadTransientResult;
+    {
+        u32 loadTransientExpectedId = MENU_HTTPS_ID;
+        FS_Archive archive = 0;
+        Handle file = 0;
+        MENUTransientHeader header;
+        u64 fileSize64 = 0;
+        u32 fileEnd;
+        u32 paddedEnd;
+        u32 totalFileSize;
+        u32 codeOffset;
+        u32 dataOffset;
+        u32 repairOffset;
+        u32 codeSize;
+        u32 dataAndBssSize;
+        u32 dataSize;
+        u32 totalSize;
+        u32 base = 0;
+        u32 dataAddress;
+        bool archiveOpen = false;
+        bool fileOpen = false;
+        bool memoryAllocated = false;
+        if (!image)
+        {
+            loadTransientResult = false;
+            goto loadTransientDone;
+        }
+        image->base = 0;
+        image->codeSize = 0;
+        image->totalSize = 0;
+        image->codeProtected = false;
+        {
+            Result result = MENU_HOST__FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath));
+            if (R_FAILED(result))
+            {
+                PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageOpenArchive, result);
+                goto loadTransientFail;
+            }
+        }
+        archiveOpen = true;
+        {
+            Result result = MENU_HOST__FSUSER_OpenFile(&file, archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUHttpsPath), FS_OPEN_READ, 0);
+            if (R_FAILED(result))
+            {
+                PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageOpenHttps, result);
+                goto loadTransientFail;
+            }
+        }
+        fileOpen = true;
+        bool validateRepairCondition = (
+            R_FAILED(MENU_HOST__FSFILE_GetSize(file, &fileSize64)) ||
+            fileSize64 < MENU_TRANSIENT_HEADER_SIZE || fileSize64 > MENU_TRANSIENT_MAX_FILE_SIZE ||
+            !PLUGIN_MENU_OnlineReadExact(file, 0, &header, sizeof(header)) ||
+            header.magic != MENU_TRANSIENT_MAGIC || header.plgid != loadTransientExpectedId ||
+            !header.codeSize || (header.metadataSize & 0xFu) ||
+            !PLUGIN_MENU_OnlineAdd32(MENU_TRANSIENT_HEADER_SIZE, header.fastRelocSize, &codeOffset) ||
+            !PLUGIN_MENU_OnlineAdd32(codeOffset, header.codeSize, &dataOffset) ||
+            !PLUGIN_MENU_OnlineAdd32(dataOffset, header.dataSize, &repairOffset) ||
+            !PLUGIN_MENU_OnlineAdd32(repairOffset, header.repairSize, &fileEnd) ||
+            !PLUGIN_MENU_OnlineAlign16(fileEnd, &paddedEnd) ||
+            !PLUGIN_MENU_OnlineAdd32(paddedEnd, header.metadataSize, &totalFileSize) ||
+            totalFileSize != (u32)fileSize64 ||
+            !PLUGIN_MENU_OnlineAlignPage(header.codeSize, &codeSize) ||
+            !PLUGIN_MENU_OnlineAdd32(header.dataSize, header.bssSize, &dataAndBssSize) ||
+            !PLUGIN_MENU_OnlineAlignPage(dataAndBssSize, &dataSize) ||
+            !PLUGIN_MENU_OnlineAdd32(codeSize, dataSize, &totalSize) ||
+            !totalSize || totalSize > MENU_TRANSIENT_MAX_RUNTIME_SIZE);
+        if (!validateRepairCondition)
+        {
+            bool validateRepairResult;
+            {
+                Handle validateRepairFile = file;
+                u32 validateRepairRepairOffset = repairOffset;
+                u32 validateRepairRepairSize = header.repairSize;
+                u32 exportCount;
+                u32 exportBytes;
+                if (validateRepairRepairSize < 4u || !PLUGIN_MENU_OnlineReadExact(validateRepairFile, validateRepairRepairOffset, &exportCount, 4u))
+                {
+                    validateRepairResult = false;
+                    goto validateRepairDone;
+                }
+                if (!PLUGIN_MENU_OnlineMul32(exportCount, 12u, &exportBytes))
+                {
+                    validateRepairResult = false;
+                    goto validateRepairDone;
+                }
+                validateRepairResult = exportBytes == (validateRepairRepairSize - 4u);
+                validateRepairDone:;
+
+            }
+            validateRepairCondition = !validateRepairResult != 0;
+        }
+        if (validateRepairCondition)
+        {
+            PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageValidate, (Result) 0xD8A0A046u);
+            goto loadTransientFail;
+        }
+        if (!PLUGIN_MENU_TempAlloc(totalSize, &base))
+        {
+            PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageAllocate, (Result) 0xD8A0A047u);
+            goto loadTransientFail;
+        }
+        memoryAllocated = true;
+        dataAddress = base + codeSize;
+        if (!PLUGIN_MENU_OnlineReadExact(file, codeOffset, (void *) base, header.codeSize) || (header.dataSize && !PLUGIN_MENU_OnlineReadExact(file, dataOffset, (void *) dataAddress, header.dataSize)))
+        {
+            PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageRead, (Result) 0xD8A0A048u);
+            goto loadTransientFail;
+        }
+        for (u32 i = 0; i < header.bssSize; i++)
+            *((volatile u8 *) (dataAddress + header.dataSize + i)) = 0;
+
+        bool applyRelocsResult;
+        {
+            Handle applyRelocsFile = file;
+            u32 applyRelocsRelocOffset = MENU_TRANSIENT_HEADER_SIZE;
+            u32 applyRelocsRelocSize = header.fastRelocSize;
+            u32 applyRelocsExpectedId = loadTransientExpectedId;
+            u32 applyRelocsRuntimeBase = base;
+            u32 applyRelocsRuntimeSize = totalSize;
+            u32 cursor = 0;
+            while (cursor < applyRelocsRelocSize)
+            {
+                u32 group[2];
+                u32 pairBytes;
+                if ((applyRelocsRelocSize - cursor) < 8u || !PLUGIN_MENU_OnlineReadExact(applyRelocsFile, applyRelocsRelocOffset + cursor, group, 8u) || group[0] != applyRelocsExpectedId || !PLUGIN_MENU_OnlineMul32(group[1], 8u, &pairBytes) || pairBytes > (applyRelocsRelocSize - cursor - 8u))
+                {
+                    {
+                        applyRelocsResult = false;
+                        goto applyRelocsDone;
+                    }
+                }
+                cursor += 8u;
+                for (u32 i = 0; i < group[1]; i++)
+                {
+                    u32 pair[2];
+                    if (!PLUGIN_MENU_OnlineReadExact(applyRelocsFile, applyRelocsRelocOffset + cursor, pair, 8u) || pair[0] & 3u || pair[0] > (applyRelocsRuntimeSize - 4u) || pair[1] >= applyRelocsRuntimeSize)
+                    {
+                        {
+                            applyRelocsResult = false;
+                            goto applyRelocsDone;
+                        }
+                    }
+                    *((volatile u32 *) (applyRelocsRuntimeBase + pair[0])) = applyRelocsRuntimeBase + pair[1];
+                    cursor += 8u;
+                }
+
+            }
+
+            applyRelocsResult = cursor == applyRelocsRelocSize;
+            applyRelocsDone:;
+
+        }
+        if (!applyRelocsResult)
+        {
+            PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageRelocate, (Result) 0xD8A0A049u);
+            goto loadTransientFail;
+        }
+        MENU_HOST__FSFILE_Close(file);
+        file = 0;
+        fileOpen = false;
+        MENU_HOST__FSUSER_CloseArchive(archive);
+        archive = 0;
+        archiveOpen = false;
+        MENU_HOST__svcFlushEntireDataCache();
+        {
+            Result result = PLUGIN_MENU_OnlineProtect(base, codeSize, MEMPERM_READEXECUTE);
+            if (R_FAILED(result))
+            {
+                PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageProtect, result);
+                goto loadTransientFail;
+            }
+        }
+        MENU_HOST__svcInvalidateEntireInstructionCache();
+        image->base = base;
+        image->codeSize = codeSize;
+        image->totalSize = totalSize;
+        image->codeProtected = true;
+        {
+            loadTransientResult = true;
+            goto loadTransientDone;
+        }
+        loadTransientFail:
+        if (fileOpen)
+            MENU_HOST__FSFILE_Close(file);
+
+        if (archiveOpen)
+            MENU_HOST__FSUSER_CloseArchive(archive);
+        if (memoryAllocated)
+        {
+            MENUTransientImage temporary = {base, codeSize, totalSize, false};
+            PLUGIN_MENU_OnlineFree(&temporary);
+        }
+        loadTransientResult = false;
+        loadTransientDone:;
+
+    }
+    if (!loadTransientResult)
+        return false;
+    g_MENUHttpsHostApi.version = MENU_HTTPS_HOST_API_VERSION;
+    g_MENUHttpsHostApi.hostTable = pluginTable_MENU;
+    g_MENUHttpsHostApi.protectMemory = PLUGIN_MENU_OnlineProtect;
+    g_MENUHttpsHostApi.addSysplugin = PLUGIN_MENU_AddSysplugin;
+    g_MENUHttpsHostApi.disableSysplugin = PLUGIN_MENU_DisableSysplugin;
+    g_MENUHttpsHostApi.enableSysplugin = PLUGIN_MENU_EnableSysplugin;
+    g_MENUHttpsHostApi.deleteSysplugin = PLUGIN_MENU_DeleteSysplugin;
+    g_MENUHttpsHostApi.readTouch = MENU_HOST__hidTouchRead;
+    g_MENUHttpsHostApi.addOnlineEntry = PLUGIN_MENU_AddOnlineEntry;
+    g_MENUHttpsHostApi.removeOnlineEntry = PLUGIN_MENU_RemoveOnlineEntry;
+    api.version = 0;
+    api.downloadToFile = NULL;
+    api.downloadToMemory = NULL;
+    api.openOnlineMenu = NULL;
+    api.openOnlineSource = NULL;
+    bool ok = ((bool (*)(const MENUHttpsHostApi *, MENUHttpsApi *)) image->base)(&g_MENUHttpsHostApi, &api);
+    if (!ok || api.version != MENU_HTTPS_API_VERSION || !api.downloadToFile || !api.downloadToMemory || !api.openOnlineMenu || !api.openOnlineSource)
+    {
+        PLUGIN_MENU_OnlineSetFailure(g_MENUOnlineStageInitHttps, (Result) 0xD8A0A069u);
+        PLUGIN_MENU_OnlineFree(image);
+        return false;
+    }
+    g_MENUHttpsOpenOnline = api.openOnlineMenu;
+    g_MENUHttpsOpenOnlineSource = api.openOnlineSource;
+    return true;
 }
 
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_LoadHttpsLibraryWithRefresh(MENUTransientImage *image)
@@ -995,24 +864,19 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_DrawOpeningHttps(void)
     MENU_HOST__Draw_Unlock();
 }
 
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_DrawOnlineFrame(void)
-{
-    MENU_HOST__Draw_DrawString(10, 8, MENU_ONLINE_BORDER_COLOR, g_MENUOnlinePlus);
-    MENU_HOST__Draw_DrawString(16, 8, MENU_ONLINE_BORDER_COLOR, g_MENUOnlineRail);
-    MENU_HOST__Draw_DrawString(148, 8, MENU_ONLINE_BORDER_COLOR, g_MENUOnlinePlus);
-    MENU_HOST__Draw_DrawString(10, 16, MENU_ONLINE_BORDER_COLOR, g_MENUOnlinePipe);
-    MENU_HOST__Draw_DrawString(148, 16, MENU_ONLINE_BORDER_COLOR, g_MENUOnlinePipe);
-    MENU_HOST__Draw_DrawString(10, 24, MENU_ONLINE_BORDER_COLOR, g_MENUOnlinePlus);
-    MENU_HOST__Draw_DrawString(16, 24, MENU_ONLINE_BORDER_COLOR, g_MENUOnlineRail);
-    MENU_HOST__Draw_DrawString(148, 24, MENU_ONLINE_BORDER_COLOR, g_MENUOnlinePlus);
-    MENU_HOST__Draw_DrawString(20, 16, MENU_ONLINE_TITLE_COLOR, g_MENUOnlineErrorTitle);
-}
-
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_DrawOnlineError(void)
 {
     MENU_HOST__Draw_Lock();
     MENU_HOST__Draw_ClearFramebuffer();
-    PLUGIN_MENU_DrawOnlineFrame();
+    MENU_HOST__Draw_DrawString(10, 8, MENU_ONLINE_BORDER_COLOR, g_MENUPlus);
+    MENU_HOST__Draw_DrawString(16, 8, MENU_ONLINE_BORDER_COLOR, MENU_ONLINE_RAIL);
+    MENU_HOST__Draw_DrawString(148, 8, MENU_ONLINE_BORDER_COLOR, g_MENUPlus);
+    MENU_HOST__Draw_DrawString(10, 16, MENU_ONLINE_BORDER_COLOR, g_MENUPipe);
+    MENU_HOST__Draw_DrawString(148, 16, MENU_ONLINE_BORDER_COLOR, g_MENUPipe);
+    MENU_HOST__Draw_DrawString(10, 24, MENU_ONLINE_BORDER_COLOR, g_MENUPlus);
+    MENU_HOST__Draw_DrawString(16, 24, MENU_ONLINE_BORDER_COLOR, MENU_ONLINE_RAIL);
+    MENU_HOST__Draw_DrawString(148, 24, MENU_ONLINE_BORDER_COLOR, g_MENUPlus);
+    MENU_HOST__Draw_DrawString(20, 16, MENU_ONLINE_TITLE_COLOR, g_MENUOnlineErrorTitle);
     MENU_HOST__Draw_DrawString(20, 45, COLOR_RED, g_MENUOnlineErrorText);
     MENU_HOST__Draw_DrawString(20, 65, COLOR_WHITE, g_MENUOnlineLastStage);
     MENU_HOST__Draw_DrawString(20, 85, COLOR_WHITE, g_MENUOnlineResultPrefix);
@@ -1020,12 +884,12 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_DrawOnlineError(void)
     MENU_HOST__Draw_DrawString(20, 120, COLOR_GRAY, g_MENUOnlineBackText);
     MENU_HOST__Draw_FlushFramebuffer();
     MENU_HOST__Draw_Unlock();
-
     do
     {
         if (MENU_HOST__waitInputWithTimeout(50) & KEY_B)
             return;
-    } while (!MENU_HOST__menuShouldExit);
+    }
+    while (!MENU_HOST__menuShouldExit);
 }
 
 PLUGIN_CODE(MENU) static char *PLUGIN_MENU_NextFetchLine(char **cursor)
@@ -1059,47 +923,6 @@ PLUGIN_CODE(MENU) static char *PLUGIN_MENU_NextFetchLine(char **cursor)
     }
 }
 
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ParseFetchSources(
-    char *config,
-    u32 configSize,
-    PluginMenuFetchSource *sources,
-    u32 *countOut
-)
-{
-    u32 count = 0;
-    char *cursor;
-
-    if (!config || !sources || configSize >= MENU_FETCH_CONFIG_MAX)
-        return false;
-
-    config[configSize] = 0;
-    cursor = config;
-
-    while (count < MENU_FETCH_MAX_SOURCES)
-    {
-        char *title = PLUGIN_MENU_NextFetchLine(&cursor);
-        char *url;
-
-        if (!title)
-            break;
-
-        url = PLUGIN_MENU_NextFetchLine(&cursor);
-        if (!url)
-            return false;
-
-        sources[count].title = title;
-        sources[count].url = url;
-        count++;
-    }
-
-    if (PLUGIN_MENU_NextFetchLine(&cursor))
-        return false;
-
-    if (countOut)
-        *countOut = count;
-    return true;
-}
-
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_IsValidFetchField(
     const char *text,
     u32 maxLength
@@ -1130,41 +953,66 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ReadFetchEditSources(
     Handle file = 0;
     u64 size64 = 0;
     u32 count = 0;
-
     if (existsOut)
         *existsOut = false;
     if (countOut)
         *countOut = 0;
-
-    if (R_FAILED(MENU_HOST__FSUSER_OpenFile(
-            &file,
-            archive,
-            MENU_HOST__fsMakePath(PATH_ASCII, g_MENUFetchPath),
-            FS_OPEN_READ,
-            0)))
+    if (R_FAILED(MENU_HOST__FSUSER_OpenFile(&file, archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUFetchPath), FS_OPEN_READ, 0)))
     {
         return allowMissing;
     }
-
     if (existsOut)
         *existsOut = true;
+    bool fetchSourcesCondition = (R_SUCCEEDED(MENU_HOST__FSFILE_GetSize(file, &size64)) && size64 < MENU_FETCH_CONFIG_MAX && (!size64 || PLUGIN_MENU_ReadExact(file, 0, g_MENUFetchEditConfig, (u32) size64))) != 0;
+    if (fetchSourcesCondition)
+    {
+        bool fetchSourcesResult;
+        {
+            char *fetchSourcesConfig = g_MENUFetchEditConfig;
+            u32 fetchSourcesConfigSize = (u32) size64;
+            PluginMenuFetchSource *fetchSourcesSources = g_MENUFetchEditSources;
+            u32 *fetchSourcesCountOut = &count;
+            u32 count = 0;
+            char *cursor;
+            if (!fetchSourcesConfig || !fetchSourcesSources || fetchSourcesConfigSize >= MENU_FETCH_CONFIG_MAX)
+            {
+                fetchSourcesResult = false;
+                goto fetchSourcesDone;
+            }
+            fetchSourcesConfig[fetchSourcesConfigSize] = 0;
+            cursor = fetchSourcesConfig;
+            while (count < MENU_FETCH_MAX_SOURCES)
+            {
+                char *title = PLUGIN_MENU_NextFetchLine(&cursor);
+                char *url;
+                if (!title)
+                    break;
+                url = PLUGIN_MENU_NextFetchLine(&cursor);
+                if (!url)
+                {
+                    fetchSourcesResult = false;
+                    goto fetchSourcesDone;
+                }
+                fetchSourcesSources[count].title = title;
+                fetchSourcesSources[count].url = url;
+                count++;
+            }
 
-    bool ok =
-        R_SUCCEEDED(MENU_HOST__FSFILE_GetSize(file, &size64)) &&
-        size64 < MENU_FETCH_CONFIG_MAX &&
-        (!size64 || PLUGIN_MENU_ReadExact(
-            file,
-            0,
-            g_MENUFetchEditConfig,
-            (u32)size64)) &&
-        PLUGIN_MENU_ParseFetchSources(
-            g_MENUFetchEditConfig,
-            (u32)size64,
-            g_MENUFetchEditSources,
-            &count);
+            if (PLUGIN_MENU_NextFetchLine(&cursor))
+            {
+                fetchSourcesResult = false;
+                goto fetchSourcesDone;
+            }
+            if (fetchSourcesCountOut)
+                *fetchSourcesCountOut = count;
+            fetchSourcesResult = true;
+            fetchSourcesDone:;
 
+        }
+        fetchSourcesCondition = fetchSourcesResult != 0;
+    }
+    bool ok = fetchSourcesCondition;
     MENU_HOST__FSFILE_Close(file);
-
     if (ok && countOut)
         *countOut = count;
     return ok;
@@ -1215,32 +1063,6 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_WriteFetchLine(
     return true;
 }
 
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_CopyFetchFile(
-    Handle source,
-    Handle destination,
-    u32 size
-)
-{
-    u32 offset = 0;
-
-    while (offset < size)
-    {
-        u32 chunk = size - offset;
-        if (chunk > MENU_FETCH_CONFIG_MAX)
-            chunk = MENU_FETCH_CONFIG_MAX;
-
-        if (!PLUGIN_MENU_ReadExact(source, offset, g_MENUFetchEditConfig, chunk) ||
-            !PLUGIN_MENU_WriteExact(destination, offset, g_MENUFetchEditConfig, chunk))
-        {
-            return false;
-        }
-
-        offset += chunk;
-    }
-
-    return true;
-}
-
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_WriteFetchEditSources(
     FS_Archive archive,
     const char *replacementTitle,
@@ -1256,26 +1078,19 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_WriteFetchEditSources(
     u32 finalCount = 0;
     bool replacementWritten = false;
     bool success = false;
-
     for (u32 i = 0; i < oldCount; i++)
     {
         PluginMenuFetchSource *source = &g_MENUFetchEditSources[i];
         bool matched = false;
-
         if (replaceMatches)
-            matched = PLUGIN_MENU_FetchSourceMatches(
-                source,
-                replacementTitle,
-                replacementUrl);
+            matched = PLUGIN_MENU_FetchSourceMatches(source, replacementTitle, replacementUrl);
         else if (removeTitle)
             matched = !PLUGIN_MENU_StringCompare(source->title, removeTitle);
-
         if (matched)
         {
             if (replaceMatches && !replacementWritten)
             {
-                if (!PLUGIN_MENU_AddFetchSize(&finalSize, replacementTitle) ||
-                    !PLUGIN_MENU_AddFetchSize(&finalSize, replacementUrl))
+                if (!PLUGIN_MENU_AddFetchSize(&finalSize, replacementTitle) || !PLUGIN_MENU_AddFetchSize(&finalSize, replacementUrl))
                 {
                     return false;
                 }
@@ -1284,9 +1099,7 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_WriteFetchEditSources(
             }
             continue;
         }
-
-        if (!PLUGIN_MENU_AddFetchSize(&finalSize, source->title) ||
-            !PLUGIN_MENU_AddFetchSize(&finalSize, source->url))
+        if (!PLUGIN_MENU_AddFetchSize(&finalSize, source->title) || !PLUGIN_MENU_AddFetchSize(&finalSize, source->url))
         {
             return false;
         }
@@ -1295,60 +1108,35 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_WriteFetchEditSources(
 
     if (replaceMatches && !replacementWritten)
     {
-        if (finalCount >= MENU_FETCH_MAX_SOURCES ||
-            !PLUGIN_MENU_AddFetchSize(&finalSize, replacementTitle) ||
-            !PLUGIN_MENU_AddFetchSize(&finalSize, replacementUrl))
+        if (finalCount >= MENU_FETCH_MAX_SOURCES || !PLUGIN_MENU_AddFetchSize(&finalSize, replacementTitle) || !PLUGIN_MENU_AddFetchSize(&finalSize, replacementUrl))
         {
             return false;
         }
         finalCount++;
     }
-
-    if (finalCount > MENU_FETCH_MAX_SOURCES ||
-        finalSize >= MENU_FETCH_CONFIG_MAX)
+    if (finalCount > MENU_FETCH_MAX_SOURCES || finalSize >= MENU_FETCH_CONFIG_MAX)
     {
         return false;
     }
-
-    if (R_FAILED(MENU_HOST__FSUSER_OpenFile(
-            &tempFile,
-            archive,
-            MENU_HOST__fsMakePath(PATH_ASCII, g_MENUFetchTempPath),
-            FS_OPEN_READ | FS_OPEN_WRITE | FS_OPEN_CREATE,
-            0)) ||
-        R_FAILED(MENU_HOST__FSFILE_SetSize(tempFile, finalSize)))
+    if (R_FAILED(MENU_HOST__FSUSER_OpenFile(&tempFile, archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUFetchTempPath), (FS_OPEN_READ | FS_OPEN_WRITE) | FS_OPEN_CREATE, 0)) || R_FAILED(MENU_HOST__FSFILE_SetSize(tempFile, finalSize)))
     {
         goto done;
     }
-
     u32 writeOffset = 0;
     replacementWritten = false;
-
     for (u32 i = 0; i < oldCount; i++)
     {
         PluginMenuFetchSource *source = &g_MENUFetchEditSources[i];
         bool matched = false;
-
         if (replaceMatches)
-            matched = PLUGIN_MENU_FetchSourceMatches(
-                source,
-                replacementTitle,
-                replacementUrl);
+            matched = PLUGIN_MENU_FetchSourceMatches(source, replacementTitle, replacementUrl);
         else if (removeTitle)
             matched = !PLUGIN_MENU_StringCompare(source->title, removeTitle);
-
         if (matched)
         {
             if (replaceMatches && !replacementWritten)
             {
-                if (!PLUGIN_MENU_WriteFetchLine(
-                        tempFile,
-                        &writeOffset,
-                        replacementTitle) ||
-                    !PLUGIN_MENU_WriteFetchLine(
-                        tempFile,
-                        &writeOffset,
-                        replacementUrl))
+                if (!PLUGIN_MENU_WriteFetchLine(tempFile, &writeOffset, replacementTitle) || !PLUGIN_MENU_WriteFetchLine(tempFile, &writeOffset, replacementUrl))
                 {
                     goto done;
                 }
@@ -1356,9 +1144,7 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_WriteFetchEditSources(
             }
             continue;
         }
-
-        if (!PLUGIN_MENU_WriteFetchLine(tempFile, &writeOffset, source->title) ||
-            !PLUGIN_MENU_WriteFetchLine(tempFile, &writeOffset, source->url))
+        if (!PLUGIN_MENU_WriteFetchLine(tempFile, &writeOffset, source->title) || !PLUGIN_MENU_WriteFetchLine(tempFile, &writeOffset, source->url))
         {
             goto done;
         }
@@ -1366,45 +1152,55 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_WriteFetchEditSources(
 
     if (replaceMatches && !replacementWritten)
     {
-        if (!PLUGIN_MENU_WriteFetchLine(
-                tempFile,
-                &writeOffset,
-                replacementTitle) ||
-            !PLUGIN_MENU_WriteFetchLine(
-                tempFile,
-                &writeOffset,
-                replacementUrl))
+        if (!PLUGIN_MENU_WriteFetchLine(tempFile, &writeOffset, replacementTitle) || !PLUGIN_MENU_WriteFetchLine(tempFile, &writeOffset, replacementUrl))
         {
             goto done;
         }
     }
-
     if (writeOffset != finalSize)
         goto done;
+    bool fetchFileCondition = (R_FAILED(MENU_HOST__FSUSER_OpenFile(&targetFile, archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUFetchPath), (FS_OPEN_READ | FS_OPEN_WRITE) | FS_OPEN_CREATE, 0)) || R_FAILED(MENU_HOST__FSFILE_SetSize(targetFile, finalSize))) != 0;
+    if (!fetchFileCondition)
+    {
+        bool fetchFileResult;
+        {
+            Handle fetchFileSource = tempFile;
+            Handle fetchFileDestination = targetFile;
+            u32 fetchFileSize = finalSize;
+            u32 offset = 0;
+            while (offset < fetchFileSize)
+            {
+                u32 chunk = fetchFileSize - offset;
+                if (chunk > MENU_FETCH_CONFIG_MAX)
+                    chunk = MENU_FETCH_CONFIG_MAX;
+                if (!PLUGIN_MENU_ReadExact(fetchFileSource, offset, g_MENUFetchEditConfig, chunk) || !PLUGIN_MENU_WriteExact(fetchFileDestination, offset, g_MENUFetchEditConfig, chunk))
+                {
+                    {
+                        fetchFileResult = false;
+                        goto fetchFileDone;
+                    }
+                }
+                offset += chunk;
+            }
 
-    if (R_FAILED(MENU_HOST__FSUSER_OpenFile(
-            &targetFile,
-            archive,
-            MENU_HOST__fsMakePath(PATH_ASCII, g_MENUFetchPath),
-            FS_OPEN_READ | FS_OPEN_WRITE | FS_OPEN_CREATE,
-            0)) ||
-        R_FAILED(MENU_HOST__FSFILE_SetSize(targetFile, finalSize)) ||
-        !PLUGIN_MENU_CopyFetchFile(tempFile, targetFile, finalSize))
+            fetchFileResult = true;
+            fetchFileDone:;
+
+        }
+        fetchFileCondition = !fetchFileResult != 0;
+    }
+    if (fetchFileCondition)
     {
         goto done;
     }
-
     success = true;
-
-done:
+    done:
     if (targetFile)
         MENU_HOST__FSFILE_Close(targetFile);
+
     if (tempFile)
         MENU_HOST__FSFILE_Close(tempFile);
-    (void)MENU_HOST__FSUSER_DeleteFile(
-        archive,
-        MENU_HOST__fsMakePath(PATH_ASCII, g_MENUFetchTempPath)
-    );
+    (void) MENU_HOST__FSUSER_DeleteFile(archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUFetchTempPath));
     return success;
 }
 
@@ -1418,62 +1214,41 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_AddOnlineEntry(
     bool exists = false;
     bool success = false;
     u32 count = 0;
-
-    if (!PLUGIN_MENU_IsValidFetchField(title, MENU_FETCH_TITLE_MAX) ||
-        !PLUGIN_MENU_IsValidFetchField(url, MENU_FETCH_BASE_MAX - 1u))
+    if (!PLUGIN_MENU_IsValidFetchField(title, MENU_FETCH_TITLE_MAX) || !PLUGIN_MENU_IsValidFetchField(url, MENU_FETCH_BASE_MAX - 1u))
     {
         return false;
     }
-
-    PLUGIN_MENU_LockFetch();
+    PLUGIN_MENU_LockWord(&g_MENUFetchLock);
     if (!PLUGIN_MENU_FetchAllocScratch())
     {
-        PLUGIN_MENU_UnlockFetch();
+        PLUGIN_MENU_UnlockWord(&g_MENUFetchLock);
         return false;
     }
-
-    if (R_FAILED(MENU_HOST__FSUSER_OpenArchive(
-            &archive,
-            ARCHIVE_SDMC,
-            MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
+    if (R_FAILED(MENU_HOST__FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
     {
         goto done;
     }
     archiveOpen = true;
-
-    if (!PLUGIN_MENU_ReadFetchEditSources(
-            archive,
-            true,
-            &exists,
-            &count))
+    if (!PLUGIN_MENU_ReadFetchEditSources(archive, true, &exists, &count))
     {
         goto done;
     }
-
     for (u32 i = 0; i < count; i++)
     {
-        if (!PLUGIN_MENU_StringCompare(g_MENUFetchEditSources[i].title, title) &&
-            !PLUGIN_MENU_StringCompare(g_MENUFetchEditSources[i].url, url))
+        if (!PLUGIN_MENU_StringCompare(g_MENUFetchEditSources[i].title, title) && !PLUGIN_MENU_StringCompare(g_MENUFetchEditSources[i].url, url))
         {
             success = true;
             goto done;
         }
     }
 
-    success = PLUGIN_MENU_WriteFetchEditSources(
-        archive,
-        title,
-        url,
-        true,
-        NULL,
-        count
-    );
-
-done:
+    success = PLUGIN_MENU_WriteFetchEditSources(archive, title, url, true, NULL, count);
+    done:
     if (archiveOpen)
         MENU_HOST__FSUSER_CloseArchive(archive);
+
     PLUGIN_MENU_FetchFreeScratch();
-    PLUGIN_MENU_UnlockFetch();
+    PLUGIN_MENU_UnlockWord(&g_MENUFetchLock);
     return success;
 }
 
@@ -1485,41 +1260,28 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_RemoveOnlineEntry(const char *title)
     bool success = false;
     bool found = false;
     u32 count = 0;
-
     if (!PLUGIN_MENU_IsValidFetchField(title, MENU_FETCH_TITLE_MAX))
         return false;
-
-    PLUGIN_MENU_LockFetch();
+    PLUGIN_MENU_LockWord(&g_MENUFetchLock);
     if (!PLUGIN_MENU_FetchAllocScratch())
     {
-        PLUGIN_MENU_UnlockFetch();
+        PLUGIN_MENU_UnlockWord(&g_MENUFetchLock);
         return false;
     }
-
-    if (R_FAILED(MENU_HOST__FSUSER_OpenArchive(
-            &archive,
-            ARCHIVE_SDMC,
-            MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
+    if (R_FAILED(MENU_HOST__FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
     {
         goto done;
     }
     archiveOpen = true;
-
-    if (!PLUGIN_MENU_ReadFetchEditSources(
-            archive,
-            true,
-            &exists,
-            &count))
+    if (!PLUGIN_MENU_ReadFetchEditSources(archive, true, &exists, &count))
     {
         goto done;
     }
-
     if (!exists)
     {
         success = true;
         goto done;
     }
-
     for (u32 i = 0; i < count; i++)
     {
         if (!PLUGIN_MENU_StringCompare(g_MENUFetchEditSources[i].title, title))
@@ -1534,21 +1296,13 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_RemoveOnlineEntry(const char *title)
         success = true;
         goto done;
     }
-
-    success = PLUGIN_MENU_WriteFetchEditSources(
-        archive,
-        NULL,
-        NULL,
-        false,
-        title,
-        count
-    );
-
-done:
+    success = PLUGIN_MENU_WriteFetchEditSources(archive, NULL, NULL, false, title, count);
+    done:
     if (archiveOpen)
         MENU_HOST__FSUSER_CloseArchive(archive);
+
     PLUGIN_MENU_FetchFreeScratch();
-    PLUGIN_MENU_UnlockFetch();
+    PLUGIN_MENU_UnlockWord(&g_MENUFetchLock);
     return success;
 }
 

@@ -2,59 +2,53 @@
 .balign 4
 .arm
 
-.extern g_MENUPatchCodeCallReturn
+.extern g_MENUPatchCodeResume
 .extern g_MENUHomeReturn
+.extern g_MENUHomeBranchTarget
 .extern g_MENUCreateCodeSetReturn
 .extern g_MENUCreateProcessReturn
 .extern g_MENUPlgldrCloseBranchTarget
 .extern g_MENUPlgldrInitCallReturn
-.extern PLUGIN_MENU_PatchCodeCallHandler
 .extern PLUGIN_MENU_DispatchHome
 .extern PLUGIN_MENU_PreCreateCodeSet
 .extern PLUGIN_MENU_PostCreateProcess
 .extern PLUGIN_MENU_PlgldrCloseHandler
 .extern PLUGIN_MENU_PlgldrInitHandler
 
-.global PLUGIN_MENU_PatchCodeCallHook
-.type   PLUGIN_MENU_PatchCodeCallHook, %function
-PLUGIN_MENU_PatchCodeCallHook:
-    push    {r4, lr}
-    sub     sp, sp, #24
-    ldr     r4, [sp, #32]
-    str     r4, [sp, #0]
-    ldr     r4, [sp, #36]
-    str     r4, [sp, #4]
-    ldr     r4, [sp, #40]
-    str     r4, [sp, #8]
-    ldr     r4, [sp, #44]
-    str     r4, [sp, #12]
-    ldr     r4, [sp, #48]
-    str     r4, [sp, #16]
-    ldr     r4, [sp, #52]
-    str     r4, [sp, #20]
-    bl      PLUGIN_MENU_PatchCodeCallHandler
-    add     sp, sp, #24
-    pop     {r4, lr}
-    mov     r1, #0x10000000
-    ldr     r12, =g_MENUPatchCodeCallReturn
-    ldr     pc, [r12]
+.balign 4
+@ original host patchCode() body, skipping only two overwritten prologue instructions
+.global PLUGIN_MENU_PatchCodeOriginal
+.type   PLUGIN_MENU_PatchCodeOriginal, %function
+PLUGIN_MENU_PatchCodeOriginal:
+    push    {r4-r11, lr}       @ host prologue instruction 1
+    mov     r9, r2             @ host prologue instruction 2
+    ldr     r12, =g_MENUPatchCodeResume
+    ldr     pc, [r12]          @ resume host patchCode() at entry+8
 
 .balign 4
+@ hook: verified second HOME whitelist store and its following BEQ
 .global PLUGIN_MENU_HomeHook
 .type   PLUGIN_MENU_HomeHook, %function
 PLUGIN_MENU_HomeHook:
-    ldr     r2, =0xE3A00000
-    str     r2, [r7, r3]
-    add     r3, r7, r3
-    ldr     r2, =0xE12FFF1E
-    str     r2, [r3, #4]
+    str     r2, [r3, #4]              @ replay: both whitelist writes precede callbacks
     push    {r0-r12, lr}
+    mrs     r12, cpsr                 @ stock TST result controls the overwritten BEQ
+    push    {r12}
+    sub     sp, sp, #4                @ keep the callback stack 8-byte aligned
     bl      PLUGIN_MENU_DispatchHome
+    add     sp, sp, #4
+    pop     {r12}
+    msr     cpsr_f, r12
     pop     {r0-r12, lr}
-    ldr     r12, =g_MENUHomeReturn
+    beq     1f
+    ldr     r12, =g_MENUHomeReturn     @ original fallthrough initializes r9/r8
+    ldr     pc, [r12]
+1:
+    ldr     r12, =g_MENUHomeBranchTarget @ original disabled-setting exit
     ldr     pc, [r12]
 
 .balign 4
+@ hook: marker menu_loader_createcodeset_call, matches BL / CMP / BGE
 .global PLUGIN_MENU_CreateCodeSetHook
 .type   PLUGIN_MENU_CreateCodeSetHook, %function
 PLUGIN_MENU_CreateCodeSetHook:
@@ -62,20 +56,23 @@ PLUGIN_MENU_CreateCodeSetHook:
     mov     r0, r1
     bl      PLUGIN_MENU_PreCreateCodeSet
     pop     {r0-r4, lr}
+    @ replay replaced svcCreateCodeSet call
     push    {r0}
     ldr     r0, [sp, #4]
     svc     0x73
     ldr     r2, [sp]
     str     r1, [r2]
     add     sp, sp, #4
-    cmp     r0, #0
+    cmp     r0, #0                    @ replay replaced CMP
     ldr     r12, =g_MENUCreateCodeSetReturn
     ldr     pc, [r12]
 
 .balign 4
+@ hook: marker menu_loader_createprocess_call, matches BL / MOV / LDR / BL
 .global PLUGIN_MENU_CreateProcessHook
 .type   PLUGIN_MENU_CreateProcessHook, %function
 PLUGIN_MENU_CreateProcessHook:
+    @ replay replaced svcCreateProcess call
     push    {r0}
     svc     0x75
     ldr     r2, [sp]
@@ -85,28 +82,30 @@ PLUGIN_MENU_CreateProcessHook:
     mov     r1, r2
     bl      PLUGIN_MENU_PostCreateProcess
     pop     {r0-r4, lr}
-    mov     r5, r0
+    mov     r5, r0                    @ replay replaced MOV
     ldr     r12, =g_MENUCreateProcessReturn
     ldr     pc, [r12]
 
 .balign 4
+@ hook: marker menu_loader_plgldr_exit_call, confirms call to symbol svcCloseHandle
 .global PLUGIN_MENU_PlgldrCloseHook
 .type   PLUGIN_MENU_PlgldrCloseHook, %function
 PLUGIN_MENU_PlgldrCloseHook:
     push    {r4, lr}
-    bl      PLUGIN_MENU_PlgldrCloseHandler
+    bl      PLUGIN_MENU_PlgldrCloseHandler  @ original svcCloseHandle runs inside handler
     pop     {r4, lr}
     ldr     r12, =g_MENUPlgldrCloseBranchTarget
-    ldr     pc, [r12]
+    ldr     pc, [r12]                  @ replay replaced B
 
 .balign 4
+@ hook: marker menu_loader_plgldr_init_call, confirms call to symbol plgldrInit
 .global PLUGIN_MENU_PlgldrInitCallHook
 .type   PLUGIN_MENU_PlgldrInitCallHook, %function
 PLUGIN_MENU_PlgldrInitCallHook:
     push    {r4, lr}
-    bl      PLUGIN_MENU_PlgldrInitHandler
+    bl      PLUGIN_MENU_PlgldrInitHandler @ original plgldrInit runs inside handler
     pop     {r4, lr}
-    cmp     r0, #0
+    cmp     r0, #0                    @ replay replaced CMP
     ldr     r12, =g_MENUPlgldrInitCallReturn
     ldr     pc, [r12]
 

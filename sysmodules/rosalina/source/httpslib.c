@@ -7,7 +7,7 @@
 #define PLUGIN_DATA(id)   __attribute__((section(".plugindata_" #id), used))
 #define PLUGIN_BSS(id)    __attribute__((section(".pluginbss_" #id), used))
 
-#define MENU_HTTPS_HOST_API_VERSION 5u
+#define MENU_HTTPS_HOST_API_VERSION 6u
 #define MENU_HTTPS_API_VERSION 4u
 #define HTTPS_DOWNLOAD_CHUNK_SIZE 0x1000u
 #define HTTPS_LOW 0x10000000u
@@ -17,8 +17,7 @@
 #define HTTPS_TLS_TCP_PORT 443u
 #define HTTPS_TLS_DNS_PORT 53u
 #define HTTPS_TLS_DNS_TIMEOUT_MS 3000
-
-#define PLUGIN_htps_OnlineSetFailure(stage, result) ((void)0)
+#define HTTPS_TLS_DNS_ATTEMPTS 2u
 
 typedef struct
 {
@@ -29,6 +28,9 @@ typedef struct
     bool (*disableSysplugin)(const char *name);
     bool (*enableSysplugin)(const char *name);
     bool (*deleteSysplugin)(const char *name);
+    void (*readTouch)(touchPosition *position);
+    bool (*addOnlineEntry)(const char *title, const char *url);
+    bool (*removeOnlineEntry)(const char *title);
 } MENUHttpsHostApi;
 
 typedef struct
@@ -43,7 +45,7 @@ typedef struct
 #define HTPS_ONLINE_API_VERSION 6u
 #define HTPS_TRANSIENT_MAGIC 0x26584E33u
 #define HTPS_ONLINE_ID 0x6E6C6E6Fu
-#define HTPS_TRANSIENT_HEADER_SIZE 0x2Cu
+#define HTPS_TRANSIENT_HEADER_SIZE 0x30u
 #define HTPS_TRANSIENT_MAX_FILE_SIZE 0x20000u
 #define HTPS_TRANSIENT_MAX_RUNTIME_SIZE 0x30000u
 #define HTPS_FETCH_CONFIG_MAX 0x800u
@@ -53,6 +55,12 @@ typedef struct
 #define HTPS_FS_MAX_PATH 271u
 #define HTPS_FS_BAD_ARG ((Result)0xD8A0A070u)
 #define HTPS_FS_TOO_LARGE ((Result)0xD8A0A071u)
+#define HTPS_DNS_QUERY_FAILED ((Result)0xD8A0A072u)
+#define HTPS_DNS_SOCKET_FAILED ((Result)0xD8A0A073u)
+#define HTPS_DNS_SEND_FAILED ((Result)0xD8A0A074u)
+#define HTPS_DNS_TIMEOUT ((Result)0xD8A0A075u)
+#define HTPS_DNS_RECEIVE_FAILED ((Result)0xD8A0A076u)
+#define HTPS_DNS_RESPONSE_FAILED ((Result)0xD8A0A077u)
 #define HTPS_DIR_NAME_CAP 256u
 #define HTPS_DIR_NAME_COMPLETE 1u
 
@@ -106,6 +114,7 @@ typedef struct
     u32 ownAbiHi;
     u32 expectedEnvLo;
     u32 expectedEnvHi;
+    u32 metadataSize;
 } HtpsTransientHeader;
 
 typedef struct { u32 base, codeSize, totalSize; } HtpsTransientImage;
@@ -117,7 +126,12 @@ typedef struct
     u32 used;
 } HttpsTlsHeapBlock;
 
+// host api
+
 PLUGIN_DATA(htps) static const MENUHttpsHostApi *g_httpsHost = NULL;
+
+// paths and HTTP text
+
 PLUGIN_RODATA(htps) static const char g_httpsOnlineEmptyPath[] = "";
 PLUGIN_RODATA(htps) static const char g_httpsTlsSslService[] = "ssl:C";
 PLUGIN_RODATA(htps) static const char g_httpsTlsPsService[] = "ps:ps";
@@ -128,6 +142,9 @@ PLUGIN_RODATA(htps) static const char g_httpsTlsHttpVersionHost[] = " HTTP/1.1\r
 PLUGIN_RODATA(htps) static const char g_httpsTlsHttpTail[] = "\r\nUser-Agent: Nexus3DS-SysPlugin/1\r\nConnection: close\r\n\r\n";
 PLUGIN_RODATA(htps) static const char g_httpsTlsContentLength[] = "Content-Length";
 PLUGIN_RODATA(htps) static const u32 g_httpsTlsDnsServers[] = { 0x08080808u, 0x01010101u };
+
+// TLS workspace
+
 PLUGIN_BSS(htps) static char g_httpsTlsHost[96];
 PLUGIN_BSS(htps) static u8 g_httpsTlsDnsBuffer[HTTPS_TLS_DNS_BUFFER_SIZE];
 PLUGIN_BSS(htps) static u32 g_httpsTlsHeapBase;
@@ -411,204 +428,6 @@ PLUGIN_CODE(htps) static bool PLUGIN_htps_TlsSkipDnsName(
     return false;
 }
 
-PLUGIN_CODE(htps) static bool PLUGIN_htps_TlsBuildDnsQuery(
-    const char *host,
-    u8 *buffer,
-    u32 size,
-    u32 *querySize
-)
-{
-    u32 pos = 12u;
-    const char *cursor = host;
-
-    if (size < 18u || PLUGIN_htps_TlsRandom(NULL, buffer, 2u) != 0)
-        return false;
-
-    for (u32 i = 2; i < 12u; i++)
-        buffer[i] = 0;
-    buffer[2] = 1u;
-    buffer[5] = 1u;
-
-    while (*cursor)
-    {
-        const char *label = cursor;
-        u32 length = 0;
-
-        while (*cursor && *cursor != '.')
-        {
-            length++;
-            cursor++;
-        }
-        if (!length || length > 63u || pos + length + 1u >= size)
-            return false;
-        buffer[pos++] = (u8)length;
-        for (u32 i = 0; i < length; i++)
-            buffer[pos++] = (u8)label[i];
-        if (*cursor == '.')
-            cursor++;
-    }
-
-    if (pos + 5u > size)
-        return false;
-    buffer[pos++] = 0;
-    buffer[pos++] = 0;
-    buffer[pos++] = 1;
-    buffer[pos++] = 0;
-    buffer[pos++] = 1;
-    *querySize = pos;
-    return true;
-}
-
-PLUGIN_CODE(htps) static bool PLUGIN_htps_TlsParseDnsResponse(
-    const u8 *buffer,
-    u32 size,
-    u8 id0,
-    u8 id1,
-    u32 *ip
-)
-{
-    u32 pos = 12u;
-    u16 questions;
-    u16 answers;
-
-    if (size < 12u || buffer[0] != id0 || buffer[1] != id1 ||
-        !(buffer[2] & 0x80u) || (buffer[3] & 0x0Fu))
-        return false;
-
-    questions = PLUGIN_htps_TlsRead16(buffer + 4u);
-    answers = PLUGIN_htps_TlsRead16(buffer + 6u);
-
-    for (u32 i = 0; i < questions; i++)
-    {
-        if (!PLUGIN_htps_TlsSkipDnsName(buffer, size, &pos) || pos + 4u > size)
-            return false;
-        pos += 4u;
-    }
-
-    for (u32 i = 0; i < answers; i++)
-    {
-        u16 type;
-        u16 classId;
-        u16 dataSize;
-
-        if (!PLUGIN_htps_TlsSkipDnsName(buffer, size, &pos) || pos + 10u > size)
-            return false;
-        type = PLUGIN_htps_TlsRead16(buffer + pos);
-        classId = PLUGIN_htps_TlsRead16(buffer + pos + 2u);
-        dataSize = PLUGIN_htps_TlsRead16(buffer + pos + 8u);
-        pos += 10u;
-        if (dataSize > size - pos)
-            return false;
-
-        if (type == 1u && classId == 1u && dataSize == 4u)
-        {
-            u8 *dst = (u8 *)ip;
-            dst[0] = buffer[pos];
-            dst[1] = buffer[pos + 1u];
-            dst[2] = buffer[pos + 2u];
-            dst[3] = buffer[pos + 3u];
-            return true;
-        }
-        pos += dataSize;
-    }
-    return false;
-}
-
-PLUGIN_CODE(htps) static bool PLUGIN_htps_TlsResolve(const char *host, u32 *ip)
-{
-    u32 querySize = 0;
-
-    if (!PLUGIN_htps_TlsBuildDnsQuery(
-            host,
-            g_httpsTlsDnsBuffer,
-            sizeof(g_httpsTlsDnsBuffer),
-            &querySize))
-        return false;
-
-    for (u32 server = 0; server < 2u; server++)
-    {
-        int socket = HTTPS_HOST__socSocket(AF_INET, SOCK_DGRAM, 0);
-        struct sockaddr_in address;
-        struct pollfd pollfd;
-        ssize_t received;
-        u8 id0 = g_httpsTlsDnsBuffer[0];
-        u8 id1 = g_httpsTlsDnsBuffer[1];
-        bool ok = false;
-
-        if (socket < 0)
-            continue;
-
-        PLUGIN_htps_TlsMemset(&address, 0, sizeof(address));
-        address.sin_family = AF_INET;
-        address.sin_port = PLUGIN_htps_TlsNet16(HTTPS_TLS_DNS_PORT);
-        address.sin_addr.s_addr = g_httpsTlsDnsServers[server];
-
-        if (HTTPS_HOST__socSendto(
-                socket,
-                g_httpsTlsDnsBuffer,
-                querySize,
-                0,
-                (const struct sockaddr *)&address,
-                sizeof(address)) < 0)
-            goto dns_done;
-
-        pollfd.fd = socket;
-        pollfd.events = POLLIN;
-        pollfd.revents = 0;
-        if (HTTPS_HOST__socPoll(&pollfd, 1, HTTPS_TLS_DNS_TIMEOUT_MS) <= 0 ||
-            !(pollfd.revents & POLLIN))
-            goto dns_done;
-
-        received = HTTPS_HOST__socRecvfrom(
-            socket,
-            g_httpsTlsDnsBuffer,
-            sizeof(g_httpsTlsDnsBuffer),
-            0,
-            NULL,
-            NULL);
-        if (received > 0)
-            ok = PLUGIN_htps_TlsParseDnsResponse(
-                g_httpsTlsDnsBuffer,
-                (u32)received,
-                id0,
-                id1,
-                ip);
-
-dns_done:
-        (void)HTTPS_HOST__socClose(socket);
-        if (ok)
-            return true;
-    }
-    return false;
-}
-
-PLUGIN_CODE(htps) static bool PLUGIN_htps_TlsParseUrl(
-    const char *url,
-    const char **path
-)
-{
-    const char *prefix = g_httpsTlsHttpsPrefix;
-    u32 hostSize = 0;
-
-    while (*prefix)
-    {
-        if (*url++ != *prefix++)
-            return false;
-    }
-
-    while (*url && *url != '/')
-    {
-        if (hostSize + 1u >= sizeof(g_httpsTlsHost) || *url == ':')
-            return false;
-        g_httpsTlsHost[hostSize++] = *url++;
-    }
-    if (!hostSize)
-        return false;
-    g_httpsTlsHost[hostSize] = 0;
-    *path = *url ? url : g_httpsTlsRootPath;
-    return true;
-}
-
 PLUGIN_CODE(htps) static bool PLUGIN_htps_TlsAppend(
     u8 *buffer,
     u32 size,
@@ -631,110 +450,6 @@ PLUGIN_CODE(htps) static char PLUGIN_htps_TlsLower(char c)
 {
     return c >= 'A' && c <= 'Z' ? (char)(c + ('a' - 'A')) : c;
 }
-
-PLUGIN_CODE(htps) static bool PLUGIN_htps_TlsHeaderNameEqual(
-    const u8 *line,
-    u32 lineSize,
-    const char *name
-)
-{
-    u32 i = 0;
-    while (name[i])
-    {
-        if (i >= lineSize ||
-            PLUGIN_htps_TlsLower((char)line[i]) != PLUGIN_htps_TlsLower(name[i]))
-            return false;
-        i++;
-    }
-    return i == lineSize;
-}
-
-PLUGIN_CODE(htps) static bool PLUGIN_htps_TlsParseHttpHeaders(
-    const u8 *buffer,
-    u32 headerSize,
-    u32 *contentSize
-)
-{
-    u32 pos = 0;
-    u32 lineEnd = 0;
-    bool foundLength = false;
-    u32 lengthValue = 0;
-
-    while (lineEnd + 1u < headerSize &&
-           !(buffer[lineEnd] == '\r' && buffer[lineEnd + 1u] == '\n'))
-        lineEnd++;
-    if (lineEnd + 1u >= headerSize || lineEnd < 12u ||
-        buffer[0] != 'H' || buffer[1] != 'T' || buffer[2] != 'T' || buffer[3] != 'P')
-        return false;
-
-    while (pos < lineEnd && buffer[pos] != ' ')
-        pos++;
-    if (pos + 4u > lineEnd || buffer[pos + 1u] != '2' ||
-        buffer[pos + 2u] != '0' || buffer[pos + 3u] != '0')
-        return false;
-
-    pos = lineEnd + 2u;
-    while (pos + 1u < headerSize)
-    {
-        u32 start = pos;
-        u32 end = pos;
-        u32 colon;
-
-        while (end + 1u < headerSize &&
-               !(buffer[end] == '\r' && buffer[end + 1u] == '\n'))
-            end++;
-        if (end + 1u >= headerSize)
-            return false;
-        if (end == start)
-            break;
-
-        colon = start;
-        while (colon < end && buffer[colon] != ':')
-            colon++;
-        if (colon < end &&
-            PLUGIN_htps_TlsHeaderNameEqual(
-                buffer + start,
-                colon - start,
-                g_httpsTlsContentLength))
-        {
-            u32 value = 0;
-            u32 at = colon + 1u;
-            bool digit = false;
-            while (at < end && (buffer[at] == ' ' || buffer[at] == '\t'))
-                at++;
-            while (at < end && buffer[at] >= '0' && buffer[at] <= '9')
-            {
-                u32 next = value * 10u + (u32)(buffer[at] - '0');
-                if (next < value)
-                    return false;
-                value = next;
-                digit = true;
-                at++;
-            }
-            if (!digit)
-                return false;
-            lengthValue = value;
-            foundLength = true;
-        }
-        pos = end + 2u;
-    }
-
-    if (!foundLength)
-        return false;
-    *contentSize = lengthValue;
-    return true;
-}
-
-
-PLUGIN_CODE(htps) static bool PLUGIN_htps_OnlineAdd32(u32 a, u32 b, u32 *out)
-{
-    u32 value = a + b;
-    if (value < a)
-        return false;
-    *out = value;
-    return true;
-}
-
 
 PLUGIN_CODE(htps) static bool PLUGIN_htps_OnlineFindFreeRange(u32 size, u32 *outBase)
 {
@@ -773,51 +488,6 @@ PLUGIN_CODE(htps) static bool PLUGIN_htps_OnlineFindFreeRange(u32 size, u32 *out
     }
 
     return false;
-}
-
-
-PLUGIN_CODE(htps) static Result PLUGIN_htps_TlsHeapInit(void)
-{
-    u32 base = 0;
-    u32 allocated = 0;
-    HttpsTlsHeapBlock *block;
-    Result result;
-
-    if (g_httpsTlsHeapBase)
-        return 0;
-    if (!PLUGIN_htps_OnlineFindFreeRange(HTTPS_TLS_HEAP_SIZE, &base))
-        return (Result)0xD8A0A047u;
-
-    result = HTTPS_HOST__svcControlMemoryUnsafe(
-        &allocated,
-        base,
-        HTTPS_TLS_HEAP_SIZE,
-        MEMOP_ALLOC | MEMOP_REGION_SYSTEM,
-        MEMPERM_READWRITE);
-    if (R_FAILED(result) || !allocated)
-        return R_FAILED(result) ? result : (Result)0xD8A0A047u;
-
-    g_httpsTlsHeapBase = allocated;
-    g_httpsTlsHeapSize = HTTPS_TLS_HEAP_SIZE;
-    block = (HttpsTlsHeapBlock *)allocated;
-    block->size = HTTPS_TLS_HEAP_SIZE - sizeof(*block);
-    block->used = 0;
-    return 0;
-}
-
-PLUGIN_CODE(htps) static void PLUGIN_htps_TlsHeapDestroy(void)
-{
-    u32 out;
-    if (!g_httpsTlsHeapBase)
-        return;
-    (void)HTTPS_HOST__svcControlMemoryUnsafe(
-        &out,
-        g_httpsTlsHeapBase,
-        g_httpsTlsHeapSize,
-        MEMOP_FREE | MEMOP_REGION_SYSTEM,
-        MEMPERM_DONTCARE);
-    g_httpsTlsHeapBase = 0;
-    g_httpsTlsHeapSize = 0;
 }
 
 PLUGIN_CODE(htps) void *PLUGIN_htps_TlsCalloc(size_t count, size_t itemSize)
@@ -916,7 +586,6 @@ PLUGIN_CODE(htps) void PLUGIN_htps_TlsFree(void *pointer)
     }
 }
 
-
 PLUGIN_CODE(htps) static Result PLUGIN_htps_OnlineDownload(
     const char *url,
     const char *path,
@@ -945,237 +614,510 @@ PLUGIN_CODE(htps) static Result PLUGIN_htps_OnlineDownload(
     bool bufferReady = false;
     bool ok = false;
     Result result = 0;
-
     if (actualSize)
         *actualSize = 0;
-
-    if (!url || !*url || !maxSize ||
-        (toFile && !*path) || (!toFile && !output))
+    if (!url || !(*url) || !maxSize || (toFile && !(*path)) || (!toFile && !output))
     {
-        result = (Result)0xD8A0A04Bu;
-        PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsParseUrl, result);
+        result = (Result) 0xD8A0A04Bu;
         goto done;
     }
-
-    if (!PLUGIN_htps_TlsParseUrl(url, &urlPath))
+    bool parseUrlResult;
     {
-        result = (Result)0xD8A0A04Bu;
-        PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsParseUrl, result);
+        const char *parseUrlUrl = url;
+        const char *prefix = g_httpsTlsHttpsPrefix;
+        u32 hostSize = 0;
+        while (*prefix)
+        {
+            if (*(parseUrlUrl++) != *(prefix++))
+            {
+                parseUrlResult = false;
+                goto parseUrlDone;
+            }
+        }
+
+        while (*parseUrlUrl && *parseUrlUrl != '/')
+        {
+            if ((hostSize + 1u) >= sizeof(g_httpsTlsHost) || *parseUrlUrl == ':')
+            {
+                parseUrlResult = false;
+                goto parseUrlDone;
+            }
+            g_httpsTlsHost[hostSize++] = *(parseUrlUrl++);
+        }
+
+        if (!hostSize)
+        {
+            parseUrlResult = false;
+            goto parseUrlDone;
+        }
+        g_httpsTlsHost[hostSize] = 0;
+        urlPath = (*parseUrlUrl) ? (parseUrlUrl) : (g_httpsTlsRootPath);
+        parseUrlResult = true;
+        parseUrlDone:;
+
+    }
+    if (!parseUrlResult)
+    {
+        result = (Result) 0xD8A0A04Bu;
         goto done;
     }
+    Result heapInitResult;
+    {
+        u32 base = 0;
+        u32 allocated = 0;
+        HttpsTlsHeapBlock *block;
+        Result result;
+        if (g_httpsTlsHeapBase)
+        {
+            heapInitResult = 0;
+            goto heapInitDone;
+        }
+        if (!PLUGIN_htps_OnlineFindFreeRange(HTTPS_TLS_HEAP_SIZE, &base))
+        {
+            heapInitResult = (Result) 0xD8A0A047u;
+            goto heapInitDone;
+        }
+        result = HTTPS_HOST__svcControlMemoryUnsafe(&allocated, base, HTTPS_TLS_HEAP_SIZE, MEMOP_ALLOC | MEMOP_REGION_SYSTEM, MEMPERM_READWRITE);
+        if (R_FAILED(result) || !allocated)
+        {
+            heapInitResult = (R_FAILED(result)) ? (result) : ((Result) 0xD8A0A047u);
+            goto heapInitDone;
+        }
+        g_httpsTlsHeapBase = allocated;
+        g_httpsTlsHeapSize = HTTPS_TLS_HEAP_SIZE;
+        block = (HttpsTlsHeapBlock *) allocated;
+        block->size = HTTPS_TLS_HEAP_SIZE - sizeof(*block);
+        block->used = 0;
+        heapInitResult = 0;
+        heapInitDone:;
 
-    result = PLUGIN_htps_TlsHeapInit();
+    }
+    result = heapInitResult;
     if (R_FAILED(result))
     {
-        PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsAllocate, result);
         goto done;
     }
     heapReady = true;
-
     result = HTTPS_HOST__miniSocInit();
     if (R_FAILED(result))
     {
-        PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsInitSoc, result);
         goto done;
     }
     socReady = true;
-
-    if (!PLUGIN_htps_TlsResolve(g_httpsTlsHost, &ip))
+    // retry both DNS servers before giving up
+    result = HTPS_DNS_QUERY_FAILED;
+    for (u32 attempt = 0; attempt < HTTPS_TLS_DNS_ATTEMPTS; attempt++)
     {
-        result = (Result)0xD8A0A062u;
-        PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsDns, result);
-        goto done;
+        for (u32 server = 0; server < 2u; server++)
+        {
+            const char *tlsResolveHost = g_httpsTlsHost;
+            u32 querySize = 0;
+            bool dnsQueryResult;
+            {
+                const char *dnsQueryHost = tlsResolveHost;
+                u8 *dnsQueryBuffer = g_httpsTlsDnsBuffer;
+                u32 dnsQuerySize = sizeof(g_httpsTlsDnsBuffer);
+                u32 pos = 12u;
+                const char *cursor = dnsQueryHost;
+                if (dnsQuerySize < 18u || PLUGIN_htps_TlsRandom(NULL, dnsQueryBuffer, 2u) != 0)
+                {
+                    dnsQueryResult = false;
+                    goto dnsQueryDone;
+                }
+                for (u32 i = 2; i < 12u; i++)
+                    dnsQueryBuffer[i] = 0;
+
+                dnsQueryBuffer[2] = 1u;
+                dnsQueryBuffer[5] = 1u;
+                while (*cursor)
+                {
+                    const char *label = cursor;
+                    u32 length = 0;
+                    while (*cursor && *cursor != '.')
+                    {
+                        length++;
+                        cursor++;
+                    }
+
+                    if (!length || length > 63u || (pos + length + 1u) >= dnsQuerySize)
+                    {
+                        dnsQueryResult = false;
+                        goto dnsQueryDone;
+                    }
+                    dnsQueryBuffer[pos++] = (u8) length;
+                    PLUGIN_htps_TlsMemcpy(dnsQueryBuffer + pos, label, length);
+                    pos += length;
+
+                    if (*cursor == '.')
+                        cursor++;
+                }
+
+                if ((pos + 5u) > dnsQuerySize)
+                {
+                    dnsQueryResult = false;
+                    goto dnsQueryDone;
+                }
+                dnsQueryBuffer[pos++] = 0;
+                dnsQueryBuffer[pos++] = 0;
+                dnsQueryBuffer[pos++] = 1;
+                dnsQueryBuffer[pos++] = 0;
+                dnsQueryBuffer[pos++] = 1;
+                querySize = pos;
+                dnsQueryResult = true;
+                dnsQueryDone:;
+
+            }
+            if (!dnsQueryResult)
+            {
+                result = HTPS_DNS_QUERY_FAILED;
+                goto tlsResolveDone;
+            }
+            u8 id0 = g_httpsTlsDnsBuffer[0];
+            u8 id1 = g_httpsTlsDnsBuffer[1];
+            int socket = HTTPS_HOST__socSocket(AF_INET, SOCK_DGRAM, 0);
+            if (socket < 0)
+            {
+                result = HTPS_DNS_SOCKET_FAILED;
+                continue;
+            }
+            struct sockaddr_in address;
+            struct pollfd pollfd;
+            PLUGIN_htps_TlsMemset(&address, 0, sizeof(address));
+            address.sin_family = AF_INET;
+            address.sin_port = PLUGIN_htps_TlsNet16(HTTPS_TLS_DNS_PORT);
+            address.sin_addr.s_addr = g_httpsTlsDnsServers[server];
+            if (HTTPS_HOST__socSendto(socket, g_httpsTlsDnsBuffer, querySize, 0, (const struct sockaddr *)&address, sizeof(address)) < 0)
+            {
+                result = HTPS_DNS_SEND_FAILED;
+                goto tlsResolveDns_done;
+            }
+            pollfd.fd = socket;
+            pollfd.events = POLLIN;
+            pollfd.revents = 0;
+            if (HTTPS_HOST__socPoll(&pollfd, 1, HTTPS_TLS_DNS_TIMEOUT_MS) <= 0 || !(pollfd.revents & POLLIN))
+            {
+                result = HTPS_DNS_TIMEOUT;
+                goto tlsResolveDns_done;
+            }
+            ssize_t received = HTTPS_HOST__socRecvfrom(socket, g_httpsTlsDnsBuffer, sizeof(g_httpsTlsDnsBuffer), 0, NULL, NULL);
+            if (received <= 0)
+            {
+                result = HTPS_DNS_RECEIVE_FAILED;
+                goto tlsResolveDns_done;
+            }
+            bool dnsResponseResult;
+            {
+                const u8 *dnsResponseBuffer = g_httpsTlsDnsBuffer;
+                u32 dnsResponseSize = (u32) received;
+                u8 dnsResponseId0 = id0;
+                u8 dnsResponseId1 = id1;
+                u32 pos = 12u;
+                u16 questions;
+                u16 answers;
+                if (dnsResponseSize < 12u || dnsResponseBuffer[0] != dnsResponseId0 || dnsResponseBuffer[1] != dnsResponseId1 || !(dnsResponseBuffer[2] & 0x80u) || dnsResponseBuffer[3] & 0x0Fu)
+                {
+                    dnsResponseResult = false;
+                    goto dnsResponseDone;
+                }
+                questions = PLUGIN_htps_TlsRead16(dnsResponseBuffer + 4u);
+                answers = PLUGIN_htps_TlsRead16(dnsResponseBuffer + 6u);
+                for (u32 i = 0; i < questions; i++)
+                {
+                    if (!PLUGIN_htps_TlsSkipDnsName(dnsResponseBuffer, dnsResponseSize, &pos) || (pos + 4u) > dnsResponseSize)
+                    {
+                        dnsResponseResult = false;
+                        goto dnsResponseDone;
+                    }
+                    pos += 4u;
+                }
+
+                for (u32 i = 0; i < answers; i++)
+                {
+                    u16 type;
+                    u16 classId;
+                    u16 dataSize;
+                    if (!PLUGIN_htps_TlsSkipDnsName(dnsResponseBuffer, dnsResponseSize, &pos) || (pos + 10u) > dnsResponseSize)
+                    {
+                        dnsResponseResult = false;
+                        goto dnsResponseDone;
+                    }
+                    type = PLUGIN_htps_TlsRead16(dnsResponseBuffer + pos);
+                    classId = PLUGIN_htps_TlsRead16(dnsResponseBuffer + pos + 2u);
+                    dataSize = PLUGIN_htps_TlsRead16(dnsResponseBuffer + pos + 8u);
+                    pos += 10u;
+                    if (dataSize > (dnsResponseSize - pos))
+                    {
+                        dnsResponseResult = false;
+                        goto dnsResponseDone;
+                    }
+                    if (type == 1u && classId == 1u && dataSize == 4u)
+                    {
+                        u8 *dst = (u8 *) (&ip);
+                        dst[0] = dnsResponseBuffer[pos];
+                        dst[1] = dnsResponseBuffer[pos + 1u];
+                        dst[2] = dnsResponseBuffer[pos + 2u];
+                        dst[3] = dnsResponseBuffer[pos + 3u];
+                        {
+                            dnsResponseResult = true;
+                            goto dnsResponseDone;
+                        }
+                    }
+                    pos += dataSize;
+                }
+
+                dnsResponseResult = false;
+                dnsResponseDone:;
+
+            }
+            if (dnsResponseResult)
+            {
+                (void)HTTPS_HOST__socClose(socket);
+                result = 0;
+                goto tlsResolveDone;
+            }
+            result = HTPS_DNS_RESPONSE_FAILED;
+        tlsResolveDns_done:
+            (void)HTTPS_HOST__socClose(socket);
+        }
     }
 
+tlsResolveDone:
+    if (R_FAILED(result))
+        goto done;
     tcpSocket = HTTPS_HOST__socSocket(AF_INET, SOCK_STREAM, 0);
     if (tcpSocket < 0)
     {
-        result = (Result)0xD8A0A063u;
-        PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsConnect, result);
+        result = (Result) 0xD8A0A063u;
         goto done;
     }
-
     {
         struct sockaddr_in address;
         PLUGIN_htps_TlsMemset(&address, 0, sizeof(address));
         address.sin_family = AF_INET;
         address.sin_port = PLUGIN_htps_TlsNet16(HTTPS_TLS_TCP_PORT);
         address.sin_addr.s_addr = ip;
-        if (HTTPS_HOST__socConnect(
-                tcpSocket,
-                (const struct sockaddr *)&address,
-                sizeof(address)) < 0)
+        if (HTTPS_HOST__socConnect(tcpSocket, (const struct sockaddr *) (&address), sizeof(address)) < 0)
         {
-            result = (Result)0xD8A0A064u;
-            PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsConnect, result);
+            result = (Result) 0xD8A0A064u;
             goto done;
         }
     }
-
     {
-        int tlsResult = PLUGIN_htps_TlsConnect(
-            &tls,
-            g_httpsTlsHost,
-            (void *)(u32)tcpSocket,
-            PLUGIN_htps_TlsRandom,
-            NULL,
-            PLUGIN_htps_TlsBioSend,
-            PLUGIN_htps_TlsBioRecv);
+        int tlsResult = PLUGIN_htps_TlsConnect(&tls, g_httpsTlsHost, (void *) ((u32) tcpSocket), PLUGIN_htps_TlsRandom, NULL, PLUGIN_htps_TlsBioSend, PLUGIN_htps_TlsBioRecv);
         if (tlsResult != 0)
         {
-            result = (Result)tlsResult;
-            PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsHandshake, result);
+            result = (Result) tlsResult;
             goto done;
         }
     }
-
     if (!PLUGIN_htps_OnlineFindFreeRange(HTTPS_DOWNLOAD_CHUNK_SIZE, &bufferBase))
     {
-        result = (Result)0xD8A0A047u;
-        PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsAllocate, result);
+        result = (Result) 0xD8A0A047u;
         goto done;
     }
-
-    result = HTTPS_HOST__svcControlMemoryUnsafe(
-        &allocated,
-        bufferBase,
-        HTTPS_DOWNLOAD_CHUNK_SIZE,
-        MEMOP_ALLOC | MEMOP_REGION_SYSTEM,
-        MEMPERM_READWRITE);
+    result = HTTPS_HOST__svcControlMemoryUnsafe(&allocated, bufferBase, HTTPS_DOWNLOAD_CHUNK_SIZE, MEMOP_ALLOC | MEMOP_REGION_SYSTEM, MEMPERM_READWRITE);
     if (R_FAILED(result) || !allocated)
     {
         if (R_SUCCEEDED(result))
-            result = (Result)0xD8A0A047u;
-        PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsAllocate, result);
+            result = (Result) 0xD8A0A047u;
         goto done;
     }
     bufferBase = allocated;
     bufferReady = true;
-
     {
-        u8 *buffer = (u8 *)bufferBase;
+        u8 *buffer = (u8 *) bufferBase;
         u32 requestSize = 0;
-
-        if (!PLUGIN_htps_TlsAppend(buffer, HTTPS_DOWNLOAD_CHUNK_SIZE, &requestSize, g_httpsTlsHttpGet) ||
-            !PLUGIN_htps_TlsAppend(buffer, HTTPS_DOWNLOAD_CHUNK_SIZE, &requestSize, urlPath) ||
-            !PLUGIN_htps_TlsAppend(buffer, HTTPS_DOWNLOAD_CHUNK_SIZE, &requestSize, g_httpsTlsHttpVersionHost) ||
-            !PLUGIN_htps_TlsAppend(buffer, HTTPS_DOWNLOAD_CHUNK_SIZE, &requestSize, g_httpsTlsHost) ||
-            !PLUGIN_htps_TlsAppend(buffer, HTTPS_DOWNLOAD_CHUNK_SIZE, &requestSize, g_httpsTlsHttpTail))
+        if (!PLUGIN_htps_TlsAppend(buffer, HTTPS_DOWNLOAD_CHUNK_SIZE, &requestSize, g_httpsTlsHttpGet) || !PLUGIN_htps_TlsAppend(buffer, HTTPS_DOWNLOAD_CHUNK_SIZE, &requestSize, urlPath) || !PLUGIN_htps_TlsAppend(buffer, HTTPS_DOWNLOAD_CHUNK_SIZE, &requestSize, g_httpsTlsHttpVersionHost) || !PLUGIN_htps_TlsAppend(buffer, HTTPS_DOWNLOAD_CHUNK_SIZE, &requestSize, g_httpsTlsHost) || !PLUGIN_htps_TlsAppend(buffer, HTTPS_DOWNLOAD_CHUNK_SIZE, &requestSize, g_httpsTlsHttpTail))
         {
-            result = (Result)0xD8A0A065u;
-            PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsHttp, result);
+            result = (Result) 0xD8A0A065u;
             goto done;
         }
-
         {
             int tlsResult = PLUGIN_htps_TlsWrite(tls, buffer, requestSize);
             if (tlsResult != 0)
             {
-                result = (Result)tlsResult;
-                PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsHttp, result);
+                result = (Result) tlsResult;
                 goto done;
             }
         }
-
         while (!headerEnd && headerBytes < HTTPS_DOWNLOAD_CHUNK_SIZE)
         {
-            int received = PLUGIN_htps_TlsRead(
-                tls,
-                buffer + headerBytes,
-                HTTPS_DOWNLOAD_CHUNK_SIZE - headerBytes);
+            int received = PLUGIN_htps_TlsRead(tls, buffer + headerBytes, HTTPS_DOWNLOAD_CHUNK_SIZE - headerBytes);
             if (received <= 0)
             {
-                result = received < 0 ? (Result)received : (Result)0xD8A0A066u;
-                PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsHttp, result);
+                result = (received < 0) ? ((Result) received) : ((Result) 0xD8A0A066u);
                 goto done;
             }
-            headerBytes += (u32)received;
+            headerBytes += (u32) received;
             for (u32 i = 3u; i < headerBytes; i++)
             {
-                if (buffer[i - 3u] == '\r' && buffer[i - 2u] == '\n' &&
-                    buffer[i - 1u] == '\r' && buffer[i] == '\n')
+                if (buffer[i - 3u] == '\r' && buffer[i - 2u] == '\n' && buffer[i - 1u] == '\r' && buffer[i] == '\n')
                 {
                     headerEnd = i + 1u;
                     break;
                 }
             }
+
         }
 
-        if (!headerEnd ||
-            !PLUGIN_htps_TlsParseHttpHeaders(buffer, headerEnd, &contentSize) ||
-            !contentSize || contentSize > maxSize)
+        bool httpHeadersCondition = !headerEnd != 0;
+        if (!httpHeadersCondition)
         {
-            result = (Result)0xD8A0A04Du;
-            PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsHttp, result);
+            bool httpHeadersResult;
+            {
+                const u8 *httpHeadersBuffer = buffer;
+                u32 pos = 0;
+                u32 lineEnd = 0;
+                bool foundLength = false;
+                u32 lengthValue = 0;
+                while ((lineEnd + 1u) < headerEnd && !(httpHeadersBuffer[lineEnd] == '\r' && httpHeadersBuffer[lineEnd + 1u] == '\n'))
+                    lineEnd++;
+
+                if ((lineEnd + 1u) >= headerEnd || lineEnd < 12u || httpHeadersBuffer[0] != 'H' || httpHeadersBuffer[1] != 'T' || httpHeadersBuffer[2] != 'T' || httpHeadersBuffer[3] != 'P')
+                {
+                    httpHeadersResult = false;
+                    goto httpHeadersDone;
+                }
+                while (pos < lineEnd && httpHeadersBuffer[pos] != ' ')
+                    pos++;
+
+                if ((pos + 4u) > lineEnd || httpHeadersBuffer[pos + 1u] != '2' || httpHeadersBuffer[pos + 2u] != '0' || httpHeadersBuffer[pos + 3u] != '0')
+                {
+                    httpHeadersResult = false;
+                    goto httpHeadersDone;
+                }
+                pos = lineEnd + 2u;
+                while ((pos + 1u) < headerEnd)
+                {
+                    u32 start = pos;
+                    u32 end = pos;
+                    u32 colon;
+                    while ((end + 1u) < headerEnd && !(httpHeadersBuffer[end] == '\r' && httpHeadersBuffer[end + 1u] == '\n'))
+                        end++;
+
+                    if ((end + 1u) >= headerEnd)
+                    {
+                        httpHeadersResult = false;
+                        goto httpHeadersDone;
+                    }
+                    if (end == start)
+                        break;
+                    colon = start;
+                    while (colon < end && httpHeadersBuffer[colon] != ':')
+                        colon++;
+
+                    bool nameEqualCondition = (colon < end) != 0;
+                    if (nameEqualCondition)
+                    {
+                        bool nameEqualResult;
+                        {
+                            const u8 *nameEqualLine = httpHeadersBuffer + start;
+                            u32 nameEqualLineSize = colon - start;
+                            u32 i = 0;
+                            while (g_httpsTlsContentLength[i])
+                            {
+                                if (i >= nameEqualLineSize || PLUGIN_htps_TlsLower((char) nameEqualLine[i]) != PLUGIN_htps_TlsLower(g_httpsTlsContentLength[i]))
+                                {
+                                    nameEqualResult = false;
+                                    goto nameEqualDone;
+                                }
+                                i++;
+                            }
+
+                            nameEqualResult = i == nameEqualLineSize;
+                            nameEqualDone:;
+
+                        }
+                        nameEqualCondition = nameEqualResult != 0;
+                    }
+                    if (nameEqualCondition)
+                    {
+                        u32 value = 0;
+                        u32 at = colon + 1u;
+                        bool digit = false;
+                        while (at < end && (httpHeadersBuffer[at] == ' ' || httpHeadersBuffer[at] == '\t'))
+                            at++;
+
+                        while (at < end && httpHeadersBuffer[at] >= '0' && httpHeadersBuffer[at] <= '9')
+                        {
+                            u32 next = value * 10u + (u32) (httpHeadersBuffer[at] - '0');
+                            if (next < value)
+                            {
+                                httpHeadersResult = false;
+                                goto httpHeadersDone;
+                            }
+                            value = next;
+                            digit = true;
+                            at++;
+                        }
+
+                        if (!digit)
+                        {
+                            httpHeadersResult = false;
+                            goto httpHeadersDone;
+                        }
+                        lengthValue = value;
+                        foundLength = true;
+                    }
+                    pos = end + 2u;
+                }
+
+                if (!foundLength)
+                {
+                    httpHeadersResult = false;
+                    goto httpHeadersDone;
+                }
+                contentSize = lengthValue;
+                httpHeadersResult = true;
+                httpHeadersDone:;
+
+            }
+            httpHeadersCondition = !httpHeadersResult != 0;
+        }
+        if (httpHeadersCondition || !contentSize || contentSize > maxSize)
+        {
+            result = (Result) 0xD8A0A04Du;
             goto done;
         }
     }
-
     if (toFile)
     {
-        result = HTTPS_HOST__FSUSER_OpenArchive(
-            &archive,
-            ARCHIVE_SDMC,
-            HTTPS_HOST__fsMakePath(PATH_EMPTY, g_httpsOnlineEmptyPath));
+        result = HTTPS_HOST__FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, HTTPS_HOST__fsMakePath(PATH_EMPTY, g_httpsOnlineEmptyPath));
         if (R_FAILED(result))
         {
-            PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsSave, result);
             goto done;
         }
         archiveOpen = true;
-
-        (void)HTTPS_HOST__FSUSER_DeleteFile(
-            archive,
-            HTTPS_HOST__fsMakePath(PATH_ASCII, path));
-
-        result = HTTPS_HOST__FSUSER_OpenFile(
-            &file,
-            archive,
-            HTTPS_HOST__fsMakePath(PATH_ASCII, path),
-            FS_OPEN_CREATE | FS_OPEN_WRITE,
-            0);
+        (void) HTTPS_HOST__FSUSER_DeleteFile(archive, HTTPS_HOST__fsMakePath(PATH_ASCII, path));
+        result = HTTPS_HOST__FSUSER_OpenFile(&file, archive, HTTPS_HOST__fsMakePath(PATH_ASCII, path), FS_OPEN_CREATE | FS_OPEN_WRITE, 0);
         if (R_FAILED(result))
         {
-            PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsSave, result);
             goto done;
         }
         fileOpen = true;
-
         result = HTTPS_HOST__FSFILE_SetSize(file, contentSize);
         if (R_FAILED(result))
         {
-            PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsSave, result);
             goto done;
         }
     }
-
     {
-        u8 *buffer = (u8 *)bufferBase;
+        u8 *buffer = (u8 *) bufferBase;
         u32 bodyBytes = headerBytes - headerEnd;
-
         if (bodyBytes > contentSize)
         {
-            result = (Result)0xD8A0A04Cu;
-            PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsReceive, result);
+            result = (Result) 0xD8A0A04Cu;
             goto done;
         }
-
         if (bodyBytes)
         {
             if (toFile)
             {
                 u32 written = 0;
-                result = HTTPS_HOST__FSFILE_Write(
-                    file,
-                    &written,
-                    0,
-                    buffer + headerEnd,
-                    bodyBytes,
-                    bodyBytes == contentSize ? FS_WRITE_FLUSH : 0);
+                result = HTTPS_HOST__FSFILE_Write(file, &written, 0, buffer + headerEnd, bodyBytes, (bodyBytes == contentSize) ? (FS_WRITE_FLUSH) : (0));
                 if (R_FAILED(result) || written != bodyBytes)
                 {
-                    result = R_FAILED(result) ? result : (Result)0xD8A0A04Au;
-                    PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsSave, result);
+                    result = (R_FAILED(result)) ? (result) : ((Result) 0xD8A0A04Au);
                     goto done;
                 }
             }
@@ -1185,85 +1127,77 @@ PLUGIN_CODE(htps) static Result PLUGIN_htps_OnlineDownload(
             }
             totalWritten = bodyBytes;
         }
-
         while (totalWritten < contentSize)
         {
             u32 remaining = contentSize - totalWritten;
-            u32 request = remaining > HTTPS_DOWNLOAD_CHUNK_SIZE ?
-                          HTTPS_DOWNLOAD_CHUNK_SIZE : remaining;
+            u32 request = (remaining > HTTPS_DOWNLOAD_CHUNK_SIZE) ? (HTTPS_DOWNLOAD_CHUNK_SIZE) : (remaining);
             int received = PLUGIN_htps_TlsRead(tls, buffer, request);
-
-            if (received <= 0 || (u32)received > request)
+            if (received <= 0 || (u32) received > request)
             {
-                result = received < 0 ? (Result)received : (Result)0xD8A0A049u;
-                PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsReceive, result);
+                result = (received < 0) ? ((Result) received) : ((Result) 0xD8A0A049u);
                 goto done;
             }
-
             if (toFile)
             {
                 u32 written = 0;
-                result = HTTPS_HOST__FSFILE_Write(
-                    file,
-                    &written,
-                    totalWritten,
-                    buffer,
-                    (u32)received,
-                    totalWritten + (u32)received == contentSize ? FS_WRITE_FLUSH : 0);
-                if (R_FAILED(result) || written != (u32)received)
+                result = HTTPS_HOST__FSFILE_Write(file, &written, totalWritten, buffer, (u32) received, ((totalWritten + (u32) received) == contentSize) ? (FS_WRITE_FLUSH) : (0));
+                if (R_FAILED(result) || written != (u32) received)
                 {
-                    result = R_FAILED(result) ? result : (Result)0xD8A0A04Au;
-                    PLUGIN_htps_OnlineSetFailure(g_httpsOnlineStageTlsSave, result);
+                    result = (R_FAILED(result)) ? (result) : ((Result) 0xD8A0A04Au);
                     goto done;
                 }
             }
             else
             {
-                PLUGIN_htps_TlsMemcpy((u8 *)output + totalWritten, buffer, (u32)received);
+                PLUGIN_htps_TlsMemcpy((u8 *) output + totalWritten, buffer, (u32) received);
             }
-            totalWritten += (u32)received;
+            totalWritten += (u32) received;
         }
-    }
 
+    }
     ok = totalWritten == contentSize;
     if (ok && actualSize)
         *actualSize = contentSize;
-    result = ok ? 0 : (Result)0xD8A0A049u;
-
-done:
+    result = (ok) ? (0) : ((Result) 0xD8A0A049u);
+    done:
     if (fileOpen)
         HTTPS_HOST__FSFILE_Close(file);
+
     if (archiveOpen)
     {
         if (!ok)
-            (void)HTTPS_HOST__FSUSER_DeleteFile(
-                archive,
-                HTTPS_HOST__fsMakePath(PATH_ASCII, path));
+            (void) HTTPS_HOST__FSUSER_DeleteFile(archive, HTTPS_HOST__fsMakePath(PATH_ASCII, path));
         HTTPS_HOST__FSUSER_CloseArchive(archive);
     }
     if (tls)
         PLUGIN_htps_TlsClose(tls);
     if (tcpSocket >= 0)
-        (void)HTTPS_HOST__socClose(tcpSocket);
+        (void) HTTPS_HOST__socClose(tcpSocket);
     if (socReady)
-        (void)HTTPS_HOST__miniSocExit();
+        (void) HTTPS_HOST__miniSocExit();
     if (bufferReady)
     {
         u32 out;
-        (void)HTTPS_HOST__svcControlMemoryUnsafe(
-            &out,
-            bufferBase,
-            HTTPS_DOWNLOAD_CHUNK_SIZE,
-            MEMOP_FREE | MEMOP_REGION_SYSTEM,
-            MEMPERM_DONTCARE);
+        (void) HTTPS_HOST__svcControlMemoryUnsafe(&out, bufferBase, HTTPS_DOWNLOAD_CHUNK_SIZE, MEMOP_FREE | MEMOP_REGION_SYSTEM, MEMPERM_DONTCARE);
     }
     if (heapReady)
-        PLUGIN_htps_TlsHeapDestroy();
-    return ok ? 0 : result;
+    {
+        u32 out;
+        if (!g_httpsTlsHeapBase)
+            goto heapDestroyDone;
+        (void) HTTPS_HOST__svcControlMemoryUnsafe(&out, g_httpsTlsHeapBase, g_httpsTlsHeapSize, MEMOP_FREE | MEMOP_REGION_SYSTEM, MEMPERM_DONTCARE);
+        g_httpsTlsHeapBase = 0;
+        g_httpsTlsHeapSize = 0;
+        heapDestroyDone:;
+
+    }
+    return (ok) ? (0) : (result);
 }
 
-PLUGIN_CODE(htps) static Result PLUGIN_htps_CreateDirectory(const char *p);
 PLUGIN_RODATA(htps) static const char g_htpsCreateDirectoryCommand[] = "3nx:mkdir";
+
+PLUGIN_CODE(htps) static bool PLUGIN_htps_ValidFsPath(const char *path);
+PLUGIN_CODE(htps) static Result PLUGIN_htps_OpenSd(FS_Archive *a);
 
 PLUGIN_CODE(htps) static Result PLUGIN_htps_OnlineDownloadToFile(
     const char *url,
@@ -1271,9 +1205,64 @@ PLUGIN_CODE(htps) static Result PLUGIN_htps_OnlineDownloadToFile(
     u32 maxSize
 )
 {
-    if (url && path && maxSize == 0u &&
-        PLUGIN_htps_TlsStrcmp(url, g_htpsCreateDirectoryCommand) == 0)
-        return PLUGIN_htps_CreateDirectory(path);
+    if (url && path && maxSize == 0u && PLUGIN_htps_TlsStrcmp(url, g_htpsCreateDirectoryCommand) == 0)
+    {
+        const char *createDirectoryP = path;
+        FS_Archive a = 0;
+        Result r;
+        char path[HTPS_FS_MAX_PATH + 1u];
+        u32 length = 0;
+        if (!PLUGIN_htps_ValidFsPath(createDirectoryP))
+            return HTPS_FS_BAD_ARG;
+        while (createDirectoryP[length])
+        {
+            path[length] = createDirectoryP[length];
+            length++;
+        }
+
+        path[length] = 0;
+        r = PLUGIN_htps_OpenSd(&a);
+        if (R_FAILED(r))
+            return r;
+        for (u32 i = 1u; i <= length; i++)
+        {
+            if (path[i] != '/' && path[i] != 0)
+                continue;
+            char saved = path[i];
+            path[i] = 0;
+            if (path[1])
+            {
+                Result oneDirectoryResult;
+                {
+                    FS_Archive oneDirectoryArchive = a;
+                    Handle d = 0;
+                    Result r = HTTPS_HOST__FSUSER_CreateDirectory(oneDirectoryArchive, HTTPS_HOST__fsMakePath(PATH_ASCII, path), 0);
+                    if (R_FAILED(r))
+                    {
+                        Result openResult = HTTPS_HOST__FSUSER_OpenDirectory(&d, oneDirectoryArchive, HTTPS_HOST__fsMakePath(PATH_ASCII, path));
+                        if (R_SUCCEEDED(openResult))
+                        {
+                            HTTPS_HOST__FSDIR_Close(d);
+                            r = 0;
+                        }
+                    }
+                    oneDirectoryResult = r;
+                }
+                r = oneDirectoryResult;
+            }
+            path[i] = saved;
+            if (R_FAILED(r))
+                break;
+        }
+
+        if (a)
+        {
+            Result c = HTTPS_HOST__FSUSER_CloseArchive(a);
+            if (R_SUCCEEDED(r) && R_FAILED(c))
+                r = c;
+        }
+        return r;
+    }
     return PLUGIN_htps_OnlineDownload(url, path, NULL, maxSize, NULL);
 }
 
@@ -1287,17 +1276,34 @@ PLUGIN_CODE(htps) static Result PLUGIN_htps_OnlineDownloadToMemory(
     return PLUGIN_htps_OnlineDownload(url, NULL, buffer, bufferSize, actualSize);
 }
 
-
+// online files
 
 PLUGIN_RODATA(htps) static const char g_htpsFetchPath[] = "/luma/plugins/sysplgfetch.txt";
-PLUGIN_RODATA(htps) static const char g_htpsOnlinePath[] = "/luma/plugins/onlinetemporary.3on";
+PLUGIN_RODATA(htps) static const char g_htpsOnlinePath[] = "/luma/plugins/onlinepagetemp.3on";
+PLUGIN_RODATA(htps) static const char g_htpsOldOnlineName[] = "onlinetemporary.3on";
+PLUGIN_RODATA(htps) static const char g_htpsOnlineName[] = "onlinepagetemp.3on";
+
+// source chooser
+
 PLUGIN_RODATA(htps) static const char g_htpsChooserTitle[] = "Open Online Menu";
 PLUGIN_RODATA(htps) static const char g_htpsOnlineTitle[] = "Online Menu";
 PLUGIN_RODATA(htps) static const char g_htpsFetchError[] = "Could not read online sources";
-PLUGIN_RODATA(htps) static const char g_htpsNoSources[] = "No sources configured";
+PLUGIN_RODATA(htps) static const char g_htpsNoSources[] = "No sources configured.";
+PLUGIN_RODATA(htps) static const char g_htpsNoSourcesIntro[] = "Add sources to";
+PLUGIN_RODATA(htps) static const char g_htpsNoSourcesPath[] = "SD:/luma/plugins/sysplgfetch.txt";
+PLUGIN_RODATA(htps) static const char g_htpsNoSourcesBody[] = "to download Sysplugins from!";
+PLUGIN_RODATA(htps) static const char g_htpsNoSourcesDiscord[] =
+    "Visit the Nexus3DS Discord server\n"
+    "to find these.";
+
+// online status
+
 PLUGIN_RODATA(htps) static const char g_htpsOnlineError[] = "Could not load Online Menu";
 PLUGIN_RODATA(htps) static const char g_htpsWaiting[] = "Waiting...";
 PLUGIN_RODATA(htps) static const char g_htpsBack[] = "B: go back";
+
+// source confirmation
+
 PLUGIN_RODATA(htps) static const char g_htpsConfirmWarning[] = "Warning:";
 PLUGIN_RODATA(htps) static const char g_htpsConfirmBody1[] = "Sysplugins contain native executable code";
 PLUGIN_RODATA(htps) static const char g_htpsConfirmBody2[] = "with extensive system access. A malicious";
@@ -1307,15 +1313,21 @@ PLUGIN_RODATA(htps) static const char g_htpsConfirmTrust[] = "Only add sources y
 PLUGIN_RODATA(htps) static const char g_htpsConfirmA[] = "Press X to connect";
 PLUGIN_RODATA(htps) static const char g_htpsConfirmB[] = "Press B to go back";
 PLUGIN_RODATA(htps) static const char g_htpsConfirmSource[] = "Source:";
+
+// shared frame bits
+
 PLUGIN_RODATA(htps) static const char g_htpsDots[] = "...";
 PLUGIN_RODATA(htps) static const char g_htpsSelect[] = ">>";
 PLUGIN_RODATA(htps) static const char g_htpsSelectedRight[] = "<<        ";
 PLUGIN_RODATA(htps) static const char g_htpsUnselected[] = " *";
 PLUGIN_RODATA(htps) static const char g_htpsClearRow[] = "                                                  ";
 PLUGIN_RODATA(htps) static const char g_htpsChooserRail[] = "-----------------------------------";
-PLUGIN_RODATA(htps) static const char g_htpsOnlineRail[] = "----------------------";
+#define HTPS_ONLINE_RAIL (g_htpsChooserRail + 13u)
 PLUGIN_RODATA(htps) static const char g_htpsPlus[] = "+";
 PLUGIN_RODATA(htps) static const char g_htpsPipe[] = "|";
+
+// used for online loader error screen
+
 PLUGIN_RODATA(htps) static const char g_htpsStageDownload[] = "HTTPS download";
 PLUGIN_RODATA(htps) static const char g_htpsStageOpen[] = "open online 3on";
 PLUGIN_RODATA(htps) static const char g_htpsStageValidate[] = "validate online 3on";
@@ -1323,6 +1335,9 @@ PLUGIN_RODATA(htps) static const char g_htpsStageMemory[] = "map online 3on";
 PLUGIN_RODATA(htps) static const char g_htpsStageReloc[] = "relocate online 3on";
 PLUGIN_RODATA(htps) static const char g_htpsStageProtect[] = "protect online 3on";
 PLUGIN_RODATA(htps) static const char g_htpsHex[] = "0123456789ABCDEF";
+
+// source chooser state
+
 PLUGIN_BSS(htps) static char g_htpsFetchConfig[HTPS_FETCH_CONFIG_MAX];
 PLUGIN_BSS(htps) static HtpsFetchSource g_htpsFetchSources[HTPS_FETCH_MAX_SOURCES];
 PLUGIN_BSS(htps) static char g_htpsFetchBase[HTPS_FETCH_BASE_MAX];
@@ -1338,57 +1353,9 @@ PLUGIN_CODE(htps) static bool PLUGIN_htps_ReadExact(Handle file,u32 offset,void 
 PLUGIN_CODE(htps) static bool PLUGIN_htps_Add32(u32 a,u32 b,u32 *out){u32 v=a+b;if(v<a)return false;*out=v;return true;}
 PLUGIN_CODE(htps) static bool PLUGIN_htps_AlignPage(u32 value,u32 *out){if(value>0xFFFFF000u)return false;*out=(value+0xFFFu)&~0xFFFu;return true;}
 
-PLUGIN_CODE(htps) static bool PLUGIN_htps_LoadOnlineTransient(HtpsTransientImage *image)
-{
-    FS_Archive archive=0; Handle file=0; HtpsTransientHeader h; u64 size64=0;
-    u32 codeOffset,dataOffset,end,codeSize,dataSize,totalSize,base=0,allocated=0; bool memory=false; Result r=0;
-    if (!image) return false;
-    image->base=image->codeSize=image->totalSize=0;
-    r=HTTPS_HOST__FSUSER_OpenArchive(&archive,ARCHIVE_SDMC,HTTPS_HOST__fsMakePath(PATH_EMPTY,g_httpsOnlineEmptyPath));
-    if(R_FAILED(r)){PLUGIN_htps_SetOnlineFailure(g_htpsStageOpen,r);return false;}
-    r=HTTPS_HOST__FSUSER_OpenFile(&file,archive,HTTPS_HOST__fsMakePath(PATH_ASCII,g_htpsOnlinePath),FS_OPEN_READ,0);
-    if(R_FAILED(r)){PLUGIN_htps_SetOnlineFailure(g_htpsStageOpen,r);goto fail;}
-    if(R_FAILED(HTTPS_HOST__FSFILE_GetSize(file,&size64))||size64<HTPS_TRANSIENT_HEADER_SIZE||size64>HTPS_TRANSIENT_MAX_FILE_SIZE||
-       !PLUGIN_htps_ReadExact(file,0,&h,sizeof(h))||h.magic!=HTPS_TRANSIENT_MAGIC||h.plgid!=HTPS_ONLINE_ID||!h.codeSize||
-       !PLUGIN_htps_Add32(HTPS_TRANSIENT_HEADER_SIZE,h.fastRelocSize,&codeOffset)||!PLUGIN_htps_Add32(codeOffset,h.codeSize,&dataOffset)||
-       !PLUGIN_htps_Add32(dataOffset,h.dataSize,&end)||!PLUGIN_htps_Add32(end,h.repairSize,&end)||end>(u32)size64||
-       !PLUGIN_htps_AlignPage(h.codeSize,&codeSize)||!PLUGIN_htps_Add32(h.dataSize,h.bssSize,&dataSize)||!PLUGIN_htps_AlignPage(dataSize,&dataSize)||
-       !PLUGIN_htps_Add32(codeSize,dataSize,&totalSize)||!totalSize||totalSize>HTPS_TRANSIENT_MAX_RUNTIME_SIZE)
-    {PLUGIN_htps_SetOnlineFailure(g_htpsStageValidate,(Result)0xD8A0A046u);goto fail;}
-    for(u32 scan=HTTPS_LOW;scan<HTTPS_HIGH;){MemInfo info;PageInfo page;if(R_FAILED(HTTPS_HOST__svcQueryMemory(&info,&page,scan)))goto no_memory;
-      if(info.state==MEMSTATE_FREE){u32 b=info.base_addr<HTTPS_LOW?HTTPS_LOW:info.base_addr;if(b<=0xFFFFFFFFu-totalSize&&b+totalSize<=HTTPS_HIGH&&b+totalSize<=info.base_addr+info.size){base=b;break;}}
-      u32 next=info.base_addr+info.size;if(next<=scan)break;scan=next;}
-    if(!base)goto no_memory;
-    r=HTTPS_HOST__svcControlMemoryUnsafe(&allocated,base,totalSize,MEMOP_ALLOC|MEMOP_REGION_SYSTEM,MEMPERM_READWRITE);if(R_FAILED(r)||!allocated)goto no_memory;
-    base=allocated;memory=true;
-    if(!PLUGIN_htps_ReadExact(file,codeOffset,(void*)base,h.codeSize)||(h.dataSize&&!PLUGIN_htps_ReadExact(file,dataOffset,(void*)(base+codeSize),h.dataSize)))
-    {PLUGIN_htps_SetOnlineFailure(g_htpsStageValidate,(Result)0xD8A0A048u);goto fail;}
-    for(u32 i=0;i<h.bssSize;i++)*(volatile u8*)(base+codeSize+h.dataSize+i)=0;
-    {u32 group[2];if(h.fastRelocSize<8u||!PLUGIN_htps_ReadExact(file,HTPS_TRANSIENT_HEADER_SIZE,group,8u)||group[0]!=HTPS_ONLINE_ID||group[1]!=(h.fastRelocSize-8u)/8u||8u+group[1]*8u!=h.fastRelocSize)
-      {PLUGIN_htps_SetOnlineFailure(g_htpsStageReloc,(Result)0xD8A0A049u);goto fail;}
-      u32 pos=HTPS_TRANSIENT_HEADER_SIZE+8u;for(u32 i=0;i<group[1];i++,pos+=8u){u32 pair[2];if(!PLUGIN_htps_ReadExact(file,pos,pair,8u)||(pair[0]&3u)||pair[0]>totalSize-4u||pair[1]>=totalSize)
-        {PLUGIN_htps_SetOnlineFailure(g_htpsStageReloc,(Result)0xD8A0A049u);goto fail;}*(volatile u32*)(base+pair[0])=base+pair[1];}}
-    HTTPS_HOST__FSFILE_Close(file);file=0;HTTPS_HOST__FSUSER_CloseArchive(archive);archive=0;HTTPS_HOST__svcFlushEntireDataCache();
-    r=HTTPS_HOST__protectMemory(base,codeSize,MEMPERM_READEXECUTE);if(R_FAILED(r)){PLUGIN_htps_SetOnlineFailure(g_htpsStageProtect,r);goto fail;}
-    HTTPS_HOST__svcInvalidateEntireInstructionCache();image->base=base;image->codeSize=codeSize;image->totalSize=totalSize;return true;
-no_memory: PLUGIN_htps_SetOnlineFailure(g_htpsStageMemory,R_FAILED(r)?r:(Result)0xD8A0A047u);
-fail: if(file)HTTPS_HOST__FSFILE_Close(file);if(archive)HTTPS_HOST__FSUSER_CloseArchive(archive);if(memory){u32 out;(void)HTTPS_HOST__svcControlMemoryUnsafe(&out,base,totalSize,MEMOP_FREE|MEMOP_REGION_SYSTEM,MEMPERM_DONTCARE);}return false;
-}
-PLUGIN_CODE(htps) static void PLUGIN_htps_FreeOnlineTransient(HtpsTransientImage *image)
-{if(!image||!image->base)return;(void)HTTPS_HOST__protectMemory(image->base,image->codeSize,MEMPERM_READWRITE);u32 out;(void)HTTPS_HOST__svcControlMemoryUnsafe(&out,image->base,image->totalSize,MEMOP_FREE|MEMOP_REGION_SYSTEM,MEMPERM_DONTCARE);image->base=0;}
-
 PLUGIN_CODE(htps) static char *PLUGIN_htps_NextFetchLine(char **cursor)
 {if(!cursor||!*cursor)return NULL;for(;;){while(**cursor=='\r'||**cursor=='\n')(*cursor)++;if(!**cursor)return NULL;char*line=*cursor;while(**cursor&&**cursor!='\r'&&**cursor!='\n')(*cursor)++;if(**cursor)*(*cursor)++=0;while(*line==' '||*line=='\t')line++;char*end=line;while(*end)end++;while(end>line&&(end[-1]==' '||end[-1]=='\t'))*--end=0;if(*line)return line;}}
-PLUGIN_CODE(htps) static bool PLUGIN_htps_LoadFetchSources(u32 *countOut)
-{FS_Archive a=0;Handle f=0;u64 n=0;u32 count=0;bool ok=false;Result r;if(!countOut)return false;*countOut=0;if(R_FAILED(HTTPS_HOST__FSUSER_OpenArchive(&a,ARCHIVE_SDMC,HTTPS_HOST__fsMakePath(PATH_EMPTY,g_httpsOnlineEmptyPath))))return false;
- r=HTTPS_HOST__FSUSER_OpenFile(&f,a,HTTPS_HOST__fsMakePath(PATH_ASCII,g_htpsFetchPath),FS_OPEN_READ,0);
- if(R_FAILED(r)){r=HTTPS_HOST__FSUSER_OpenFile(&f,a,HTTPS_HOST__fsMakePath(PATH_ASCII,g_htpsFetchPath),FS_OPEN_WRITE|FS_OPEN_CREATE,0);if(R_FAILED(r))goto done;if(R_FAILED(HTTPS_HOST__FSFILE_Close(f))){f=0;goto done;}f=0;r=HTTPS_HOST__FSUSER_OpenFile(&f,a,HTTPS_HOST__fsMakePath(PATH_ASCII,g_htpsFetchPath),FS_OPEN_READ,0);if(R_FAILED(r))goto done;}
- if(R_FAILED(HTTPS_HOST__FSFILE_GetSize(f,&n))||n>=sizeof(g_htpsFetchConfig)||(n&&!PLUGIN_htps_ReadExact(f,0,g_htpsFetchConfig,(u32)n))) goto done;
- g_htpsFetchConfig[(u32)n]=0;
- char*cur=g_htpsFetchConfig;while(count<HTPS_FETCH_MAX_SOURCES){char*t=PLUGIN_htps_NextFetchLine(&cur);if(!t)break;char*u=PLUGIN_htps_NextFetchLine(&cur);if(!u)goto done;g_htpsFetchSources[count].title=t;g_htpsFetchSources[count].url=u;count++;}
- if(PLUGIN_htps_NextFetchLine(&cur)) goto done;
- *countOut=count;ok=true;
-done:if(f)HTTPS_HOST__FSFILE_Close(f);if(a)HTTPS_HOST__FSUSER_CloseArchive(a);return ok;}
+
 PLUGIN_CODE(htps) static bool PLUGIN_htps_SetSourceUrl(const char *url)
 {
     u32 n=0,lastSlash=0xFFFFFFFFu;
@@ -1401,55 +1368,70 @@ PLUGIN_CODE(htps) static bool PLUGIN_htps_SetSourceUrl(const char *url)
         n++;
     }
     if(!n||lastSlash==0xFFFFFFFFu||lastSlash+1u>=n||lastSlash+2u>sizeof(g_htpsFetchBase))return false;
+    // old source entries request the new file
+    u32 nameStart=lastSlash+1u;
+    if(n-nameStart==sizeof(g_htpsOldOnlineName)-1u)
+    {
+        bool oldName=true;
+        for(u32 i=0;i<sizeof(g_htpsOldOnlineName)-1u;i++)
+            if(g_htpsOnlineUrl[nameStart+i]!=g_htpsOldOnlineName[i]){oldName=false;break;}
+        if(oldName)
+        {
+            for(u32 i=0;i<sizeof(g_htpsOnlineName)-1u;i++)g_htpsOnlineUrl[nameStart+i]=g_htpsOnlineName[i];
+            n=nameStart+sizeof(g_htpsOnlineName)-1u;
+        }
+    }
     g_htpsOnlineUrl[n]=0;
     for(u32 i=0;i<=lastSlash;i++)((volatile char *)g_htpsFetchBase)[i]=((volatile const char *)g_htpsOnlineUrl)[i];
     ((volatile char *)g_htpsFetchBase)[lastSlash+1u]=0;
     return true;
 }
-PLUGIN_CODE(htps) static void PLUGIN_htps_DrawConfirmSource(const char *url)
-{
-    char line[48];
-    u32 pos = 0, y = 170;
-
-    HTTPS_HOST__Draw_Lock();
-    HTTPS_HOST__Draw_Clear();
-    HTTPS_HOST__Draw_String(20, 15, 0xF800u, g_htpsConfirmWarning);
-    HTTPS_HOST__Draw_String(20, 35, 0xFFFFu, g_htpsConfirmBody1);
-    HTTPS_HOST__Draw_String(20, 46, 0xFFFFu, g_htpsConfirmBody2);
-    HTTPS_HOST__Draw_String(20, 57, 0xFFFFu, g_htpsConfirmBody3);
-    HTTPS_HOST__Draw_String(20, 68, 0xFFFFu, g_htpsConfirmBody4);
-    HTTPS_HOST__Draw_String(20, 90, 0xFFFFu, g_htpsConfirmTrust);
-    HTTPS_HOST__Draw_String(20, 115, 0xFC00u, g_htpsConfirmA);
-    HTTPS_HOST__Draw_String(20, 130, 0x7BEFu, g_htpsConfirmB);
-    HTTPS_HOST__Draw_String(20, 155, 0xFFFFu, g_htpsConfirmSource);
-
-    while (url && url[pos] && y <= 225u)
-    {
-        u32 n = 0;
-        while (n < 47u && url[pos + n])
-        {
-            line[n] = url[pos + n];
-            n++;
-        }
-        line[n] = 0;
-        HTTPS_HOST__Draw_String(20, y, 0x87FFu, line);
-        pos += n;
-        y += 11u;
-    }
-
-    HTTPS_HOST__Draw_Flush();
-    HTTPS_HOST__Draw_Unlock();
-}
 
 PLUGIN_CODE(htps) static bool PLUGIN_htps_ConfirmSource(void)
 {
-    PLUGIN_htps_DrawConfirmSource(g_htpsFetchBase);
-    while (!*HTTPS_HOST__menuShouldExit)
+    {
+        const char *confirmSourceUrl = g_htpsFetchBase;
+        char line[48];
+        u32 pos = 0;
+        u32 y = 170;
+        HTTPS_HOST__Draw_Lock();
+        HTTPS_HOST__Draw_Clear();
+        HTTPS_HOST__Draw_String(20, 15, 0xF800u, g_htpsConfirmWarning);
+        HTTPS_HOST__Draw_String(20, 35, 0xFFFFu, g_htpsConfirmBody1);
+        HTTPS_HOST__Draw_String(20, 46, 0xFFFFu, g_htpsConfirmBody2);
+        HTTPS_HOST__Draw_String(20, 57, 0xFFFFu, g_htpsConfirmBody3);
+        HTTPS_HOST__Draw_String(20, 68, 0xFFFFu, g_htpsConfirmBody4);
+        HTTPS_HOST__Draw_String(20, 90, 0xFFFFu, g_htpsConfirmTrust);
+        HTTPS_HOST__Draw_String(20, 115, 0xFC00u, g_htpsConfirmA);
+        HTTPS_HOST__Draw_String(20, 130, 0x7BEFu, g_htpsConfirmB);
+        HTTPS_HOST__Draw_String(20, 155, 0xFFFFu, g_htpsConfirmSource);
+        while (confirmSourceUrl && confirmSourceUrl[pos] && y <= 225u)
+        {
+            u32 n = 0;
+            while (n < 47u && confirmSourceUrl[pos + n])
+            {
+                line[n] = confirmSourceUrl[pos + n];
+                n++;
+            }
+
+            line[n] = 0;
+            HTTPS_HOST__Draw_String(20, y, 0x87FFu, line);
+            pos += n;
+            y += 11u;
+        }
+
+        HTTPS_HOST__Draw_Flush();
+        HTTPS_HOST__Draw_Unlock();
+    }
+    while (!(*HTTPS_HOST__menuShouldExit))
     {
         u32 pressed = HTTPS_HOST__waitInputWithTimeout(-1);
-        if (pressed & KEY_X) return true;
-        if (pressed & KEY_B) return false;
+        if (pressed & KEY_X)
+            return true;
+        if (pressed & KEY_B)
+            return false;
     }
+
     return false;
 }
 
@@ -1481,23 +1463,6 @@ PLUGIN_CODE(htps) static void PLUGIN_htps_DrawChooserItem(u32 y, bool selected, 
     }
 }
 
-PLUGIN_CODE(htps) static void PLUGIN_htps_DrawChooser(u32 first, u32 selected, u32 count)
-{
-    u32 shown = count - first;
-    if (shown > HTPS_VISIBLE_ITEMS) shown = HTPS_VISIBLE_ITEMS;
-
-    HTTPS_HOST__Draw_Lock();
-    HTTPS_HOST__Draw_Clear();
-    PLUGIN_htps_DrawChooserFrame();
-    if (first) HTTPS_HOST__Draw_String(35, 34, 0x7BEFu, g_htpsDots);
-    for (u32 i = 0; i < shown; i++)
-        PLUGIN_htps_DrawChooserItem(45u + i * 11u, first + i == selected, g_htpsFetchSources[first + i].title);
-    if (first + shown < count)
-        HTTPS_HOST__Draw_String(35, 45u + HTPS_VISIBLE_ITEMS * 11u, 0x7BEFu, g_htpsDots);
-    HTTPS_HOST__Draw_Flush();
-    HTTPS_HOST__Draw_Unlock();
-}
-
 PLUGIN_CODE(htps) static void PLUGIN_htps_RedrawChooserSelection(u32 first, u32 oldSelected, u32 selected)
 {
     u32 oldY = 45u + (oldSelected - first) * 11u;
@@ -1523,44 +1488,31 @@ PLUGIN_CODE(htps) static void PLUGIN_htps_DrawFetchError(void)
         if (HTTPS_HOST__waitInputWithTimeout(-1) & KEY_B) break;
 }
 
-PLUGIN_CODE(htps) static void PLUGIN_htps_DrawNoSources(void)
-{
-    HTTPS_HOST__Draw_Lock();
-    HTTPS_HOST__Draw_Clear();
-    PLUGIN_htps_DrawChooserFrame();
-    HTTPS_HOST__Draw_String(35, 45, 0x7BEFu, g_htpsNoSources);
-    HTTPS_HOST__Draw_Flush();
-    HTTPS_HOST__Draw_Unlock();
-    while (!*HTTPS_HOST__menuShouldExit)
-        if (HTTPS_HOST__waitInputWithTimeout(-1) & KEY_B) break;
-}
-
-PLUGIN_CODE(htps) static void PLUGIN_htps_DrawOnlineFrame(void)
-{
-    HTTPS_HOST__Draw_String(10, 8, 0x435Cu, g_htpsPlus);
-    HTTPS_HOST__Draw_String(16, 8, 0x435Cu, g_htpsOnlineRail);
-    HTTPS_HOST__Draw_String(148, 8, 0x435Cu, g_htpsPlus);
-    HTTPS_HOST__Draw_String(10, 16, 0x435Cu, g_htpsPipe);
-    HTTPS_HOST__Draw_String(148, 16, 0x435Cu, g_htpsPipe);
-    HTTPS_HOST__Draw_String(10, 24, 0x435Cu, g_htpsPlus);
-    HTTPS_HOST__Draw_String(16, 24, 0x435Cu, g_htpsOnlineRail);
-    HTTPS_HOST__Draw_String(148, 24, 0x435Cu, g_htpsPlus);
-    HTTPS_HOST__Draw_String(20, 16, 0x07FFu, g_htpsOnlineTitle);
-}
-
 PLUGIN_CODE(htps) static void PLUGIN_htps_DrawOnlineStatus(const char *text, bool error)
 {
     HTTPS_HOST__Draw_Lock();
     HTTPS_HOST__Draw_Clear();
-    PLUGIN_htps_DrawOnlineFrame();
-    HTTPS_HOST__Draw_String(20, error ? 45u : 55u, error ? 0xF800u : 0xFFFFu, text);
+    HTTPS_HOST__Draw_String(10, 8, 0x435Cu, g_htpsPlus);
+    HTTPS_HOST__Draw_String(16, 8, 0x435Cu, HTPS_ONLINE_RAIL);
+    HTTPS_HOST__Draw_String(148, 8, 0x435Cu, g_htpsPlus);
+    HTTPS_HOST__Draw_String(10, 16, 0x435Cu, g_htpsPipe);
+    HTTPS_HOST__Draw_String(148, 16, 0x435Cu, g_htpsPipe);
+    HTTPS_HOST__Draw_String(10, 24, 0x435Cu, g_htpsPlus);
+    HTTPS_HOST__Draw_String(16, 24, 0x435Cu, HTPS_ONLINE_RAIL);
+    HTTPS_HOST__Draw_String(148, 24, 0x435Cu, g_htpsPlus);
+    HTTPS_HOST__Draw_String(20, 16, 0x07FFu, g_htpsOnlineTitle);
+    HTTPS_HOST__Draw_String(20, (error) ? (45u) : (55u), (error) ? (0xF800u) : (0xFFFFu), text);
     if (error && g_htpsLastStage)
     {
         char hex[11];
-        hex[0] = '0'; hex[1] = 'x';
-        PLUGIN_htps_TlsMemset(hex + 2, '0', 8u); hex[10] = 0;
-        u32 v = (u32)g_htpsLastResult;
-        for (u32 i = 0; i < 8u; i++) hex[2u + i] = g_htpsHex[(v >> ((7u - i) * 4u)) & 0xFu];
+        hex[0] = '0';
+        hex[1] = 'x';
+        PLUGIN_htps_TlsMemset(hex + 2, '0', 8u);
+        hex[10] = 0;
+        u32 v = (u32) g_htpsLastResult;
+        for (u32 i = 0; i < 8u; i++)
+            hex[2u + i] = g_htpsHex[(v >> ((7u - i) * 4u)) & 0xFu];
+
         HTTPS_HOST__Draw_String(20, 65, 0xFFFFu, g_htpsLastStage);
         HTTPS_HOST__Draw_String(20, 85, 0xFFFFu, hex);
         HTTPS_HOST__Draw_String(20, 120, 0x7BEFu, g_htpsBack);
@@ -1568,8 +1520,10 @@ PLUGIN_CODE(htps) static void PLUGIN_htps_DrawOnlineStatus(const char *text, boo
     HTTPS_HOST__Draw_Flush();
     HTTPS_HOST__Draw_Unlock();
     if (error)
-        while (!*HTTPS_HOST__menuShouldExit)
-            if (HTTPS_HOST__waitInputWithTimeout(-1) & KEY_B) break;
+        while (!(*HTTPS_HOST__menuShouldExit))
+        if (HTTPS_HOST__waitInputWithTimeout(-1) & KEY_B)
+        break;
+
 }
 
 PLUGIN_CODE(htps) static bool PLUGIN_htps_ValidFsPath(const char *path){if(!path||path[0]!='/')return false;for(u32 i=1;i<=HTPS_FS_MAX_PATH;i++)if(!path[i])return true;return false;}
@@ -1580,17 +1534,365 @@ PLUGIN_CODE(htps) static Result PLUGIN_htps_WriteFile(const char*p,u32 off,const
 PLUGIN_CODE(htps) static Result PLUGIN_htps_SetFileSize(const char*p,u32 sz){FS_Archive a=0;Handle f=0;Result r;if(!PLUGIN_htps_ValidFsPath(p))return HTPS_FS_BAD_ARG;r=PLUGIN_htps_OpenSd(&a);if(R_FAILED(r))return r;r=HTTPS_HOST__FSUSER_OpenFile(&f,a,HTTPS_HOST__fsMakePath(PATH_ASCII,p),FS_OPEN_WRITE|FS_OPEN_CREATE,0);if(R_SUCCEEDED(r)){r=HTTPS_HOST__FSFILE_SetSize(f,sz);HTTPS_HOST__FSFILE_Close(f);}HTTPS_HOST__FSUSER_CloseArchive(a);return r;}
 PLUGIN_CODE(htps) static Result PLUGIN_htps_DeleteFile(const char*p){FS_Archive a=0;Result r;if(!PLUGIN_htps_ValidFsPath(p))return HTPS_FS_BAD_ARG;r=PLUGIN_htps_OpenSd(&a);if(R_FAILED(r))return r;r=HTTPS_HOST__FSUSER_DeleteFile(a,HTTPS_HOST__fsMakePath(PATH_ASCII,p));HTTPS_HOST__FSUSER_CloseArchive(a);return r;}
 PLUGIN_CODE(htps) static Result PLUGIN_htps_RenameFile(const char*o,const char*n){FS_Archive a=0;Result r;if(!PLUGIN_htps_ValidFsPath(o)||!PLUGIN_htps_ValidFsPath(n))return HTPS_FS_BAD_ARG;r=PLUGIN_htps_OpenSd(&a);if(R_FAILED(r))return r;r=HTTPS_HOST__FSUSER_RenameFile(a,HTTPS_HOST__fsMakePath(PATH_ASCII,o),a,HTTPS_HOST__fsMakePath(PATH_ASCII,n));HTTPS_HOST__FSUSER_CloseArchive(a);return r;}
-PLUGIN_CODE(htps) static Result PLUGIN_htps_CreateOneDirectory(FS_Archive archive,const char*p){Handle d=0;Result r=HTTPS_HOST__FSUSER_CreateDirectory(archive,HTTPS_HOST__fsMakePath(PATH_ASCII,p),0);if(R_FAILED(r)){Result openResult=HTTPS_HOST__FSUSER_OpenDirectory(&d,archive,HTTPS_HOST__fsMakePath(PATH_ASCII,p));if(R_SUCCEEDED(openResult)){HTTPS_HOST__FSDIR_Close(d);r=0;}}return r;}
-PLUGIN_CODE(htps) static Result PLUGIN_htps_CreateDirectory(const char*p){FS_Archive a=0;Result r;char path[HTPS_FS_MAX_PATH+1u];u32 length=0;if(!PLUGIN_htps_ValidFsPath(p))return HTPS_FS_BAD_ARG;while(p[length]){path[length]=p[length];length++;}path[length]=0;r=PLUGIN_htps_OpenSd(&a);if(R_FAILED(r))return r;for(u32 i=1u;i<=length;i++){if(path[i]!='/'&&path[i]!=0)continue;char saved=path[i];path[i]=0;if(path[1])r=PLUGIN_htps_CreateOneDirectory(a,path);path[i]=saved;if(R_FAILED(r))break;}if(a){Result c=HTTPS_HOST__FSUSER_CloseArchive(a);if(R_SUCCEEDED(r)&&R_FAILED(c))r=c;}return r;}
+
 PLUGIN_CODE(htps) static Result PLUGIN_htps_FileExists(const char*p,bool*exists){FS_Archive a=0;Handle f=0;Result r;if(!exists||!PLUGIN_htps_ValidFsPath(p))return HTPS_FS_BAD_ARG;*exists=false;r=PLUGIN_htps_OpenSd(&a);if(R_FAILED(r))return r;r=HTTPS_HOST__FSUSER_OpenFile(&f,a,HTTPS_HOST__fsMakePath(PATH_ASCII,p),FS_OPEN_READ,0);if(R_SUCCEEDED(r)){*exists=true;HTTPS_HOST__FSFILE_Close(f);r=0;}else if(R_DESCRIPTION(r)==RD_NOT_FOUND)r=0;HTTPS_HOST__FSUSER_CloseArchive(a);return r;}
-PLUGIN_CODE(htps) static bool PLUGIN_htps_AppendUtf8(char*out,u32 cap,u32*len,u32 cp){u8 b[4];u32 n;if(cp<=0x7F){b[0]=(u8)cp;n=1;}else if(cp<=0x7FF){b[0]=0xC0|(cp>>6);b[1]=0x80|(cp&0x3F);n=2;}else if(cp<=0xFFFF){b[0]=0xE0|(cp>>12);b[1]=0x80|((cp>>6)&0x3F);b[2]=0x80|(cp&0x3F);n=3;}else{b[0]=0xF0|(cp>>18);b[1]=0x80|((cp>>12)&0x3F);b[2]=0x80|((cp>>6)&0x3F);b[3]=0x80|(cp&0x3F);n=4;}if(!out||!len||!cap||*len+n>=cap)return false;for(u32 i=0;i<n;i++)out[(*len)++]=(char)b[i];out[*len]=0;return true;}
-PLUGIN_CODE(htps) static bool PLUGIN_htps_DirNameToUtf8(char*out,u32 cap,const u16*in){u32 len=0;if(!out||!cap||!in)return false;out[0]=0;for(u32 i=0;i<0x106u;i++){u32 cp=in[i];if(!cp)return true;if(cp>=0xD800u&&cp<=0xDBFFu){u32 low=i+1u<0x106u?in[i+1u]:0;if(low<0xDC00u||low>0xDFFFu)cp=0xFFFDu;else{cp=0x10000u+((cp-0xD800u)<<10)+(low-0xDC00u);i++;}}else if(cp>=0xDC00u&&cp<=0xDFFFu)cp=0xFFFDu;if(!PLUGIN_htps_AppendUtf8(out,cap,&len,cp))return false;}return false;}
-PLUGIN_CODE(htps) static Result PLUGIN_htps_EnumerateDirectory(const char*p,HtpsOnlineDirVisitor visitor,void*ctx,u32*visited){FS_Archive a=0;Handle d=0;FS_DirectoryEntry raw;HtpsOnlineDirEntry e;Result r;bool open=false;if(!visitor||!PLUGIN_htps_ValidFsPath(p))return HTPS_FS_BAD_ARG;if(visited)*visited=0;r=PLUGIN_htps_OpenSd(&a);if(R_FAILED(r))return r;r=HTTPS_HOST__FSUSER_OpenDirectory(&d,a,HTTPS_HOST__fsMakePath(PATH_ASCII,p));if(R_FAILED(r))goto done;open=true;for(;;){u32 count=0;bool stop=false;r=HTTPS_HOST__FSDIR_Read(d,&count,1,&raw);if(R_FAILED(r)||!count)break;e.fileSize=raw.fileSize;e.attributes=raw.attributes;e.flags=0;if(PLUGIN_htps_DirNameToUtf8(e.name,sizeof(e.name),raw.name))e.flags|=HTPS_DIR_NAME_COMPLETE;if(visited)(*visited)++;r=visitor(&e,ctx,&stop);if(R_FAILED(r)||stop)break;}done:if(open){Result c=HTTPS_HOST__FSDIR_Close(d);if(R_SUCCEEDED(r)&&R_FAILED(c))r=c;}if(a){Result c=HTTPS_HOST__FSUSER_CloseArchive(a);if(R_SUCCEEDED(r)&&R_FAILED(c))r=c;}return r;}
+
+PLUGIN_CODE(htps) static Result PLUGIN_htps_EnumerateDirectory(const char*p,HtpsOnlineDirVisitor visitor,void*ctx,u32*visited){
+    FS_Archive a = 0;
+    Handle d = 0;
+    FS_DirectoryEntry raw;
+    HtpsOnlineDirEntry e;
+    Result r;
+    bool open = false;
+    if (!visitor || !PLUGIN_htps_ValidFsPath(p))
+        return HTPS_FS_BAD_ARG;
+    if (visited)
+        *visited = 0;
+    r = PLUGIN_htps_OpenSd(&a);
+    if (R_FAILED(r))
+        return r;
+    r = HTTPS_HOST__FSUSER_OpenDirectory(&d, a, HTTPS_HOST__fsMakePath(PATH_ASCII, p));
+    if (R_FAILED(r))
+        goto done;
+    open = true;
+    for (;;)
+    {
+        u32 count = 0;
+        bool stop = false;
+        r = HTTPS_HOST__FSDIR_Read(d, &count, 1, &raw);
+        if (R_FAILED(r) || !count)
+            break;
+        e.fileSize = raw.fileSize;
+        e.attributes = raw.attributes;
+        e.flags = 0;
+        bool utf8Result2;
+        {
+            char *utf8Out = e.name;
+            u32 utf8Cap = sizeof(e.name);
+            const u16 *utf8In = raw.name;
+            u32 len = 0;
+            if (!utf8Out || !utf8Cap || !utf8In)
+            {
+                utf8Result2 = false;
+                goto utf8Done2;
+            }
+            utf8Out[0] = 0;
+            for (u32 i = 0; i < 0x106u; i++)
+            {
+                u32 cp = utf8In[i];
+                if (!cp)
+                {
+                    utf8Result2 = true;
+                    goto utf8Done2;
+                }
+                if (cp >= 0xD800u && cp <= 0xDBFFu)
+                {
+                    u32 low = ((i + 1u) < 0x106u) ? (utf8In[i + 1u]) : (0);
+                    if (low < 0xDC00u || low > 0xDFFFu)
+                        cp = 0xFFFDu;
+                    else
+                    {
+                        cp = 0x10000u + ((cp - 0xD800u) << 10) + (low - 0xDC00u);
+                        i++;
+                    }
+                }
+                else if (cp >= 0xDC00u && cp <= 0xDFFFu)
+                    cp = 0xFFFDu;
+                bool utf8Result;
+                {
+                    char *utf8Out2 = utf8Out;
+                    u32 utf8Cap2 = utf8Cap;
+                    u32 utf8Cp = cp;
+                    u8 b[4];
+                    u32 n;
+                    if (utf8Cp <= 0x7F)
+                    {
+                        b[0] = (u8) utf8Cp;
+                        n = 1;
+                    }
+                    else if (utf8Cp <= 0x7FF)
+                    {
+                        b[0] = 0xC0 | (utf8Cp >> 6);
+                        b[1] = 0x80 | (utf8Cp & 0x3F);
+                        n = 2;
+                    }
+                    else if (utf8Cp <= 0xFFFF)
+                    {
+                        b[0] = 0xE0 | (utf8Cp >> 12);
+                        b[1] = 0x80 | ((utf8Cp >> 6) & 0x3F);
+                        b[2] = 0x80 | (utf8Cp & 0x3F);
+                        n = 3;
+                    }
+                    else
+                    {
+                        b[0] = 0xF0 | (utf8Cp >> 18);
+                        b[1] = 0x80 | ((utf8Cp >> 12) & 0x3F);
+                        b[2] = 0x80 | ((utf8Cp >> 6) & 0x3F);
+                        b[3] = 0x80 | (utf8Cp & 0x3F);
+                        n = 4;
+                    }
+                    if (!utf8Out2 || !utf8Cap2 || (len + n) >= utf8Cap2)
+                    {
+                        utf8Result = false;
+                        goto utf8Done;
+                    }
+                    PLUGIN_htps_TlsMemcpy(utf8Out2 + len, b, n);
+                    len += n;
+
+                    utf8Out2[len] = 0;
+                    utf8Result = true;
+                    utf8Done:;
+
+                }
+                if (!utf8Result)
+                {
+                    utf8Result2 = false;
+                    goto utf8Done2;
+                }
+            }
+
+            utf8Result2 = false;
+            utf8Done2:;
+
+        }
+        if (utf8Result2)
+            e.flags |= HTPS_DIR_NAME_COMPLETE;
+        if (visited)
+            (*visited)++;
+        r = visitor(&e, ctx, &stop);
+        if (R_FAILED(r) || stop)
+            break;
+    }
+
+    done:
+    if (open)
+    {
+        Result c = HTTPS_HOST__FSDIR_Close(d);
+        if (R_SUCCEEDED(r) && R_FAILED(c))
+            r = c;
+    }
+
+    if (a)
+    {
+        Result c = HTTPS_HOST__FSUSER_CloseArchive(a);
+        if (R_SUCCEEDED(r) && R_FAILED(c))
+            r = c;
+    }
+    return r;
+}
 
 PLUGIN_CODE(htps) static bool PLUGIN_htps_RunOnlineSource(void)
-{HtpsTransientImage image;PLUGIN_htps_DrawOnlineStatus(g_htpsWaiting,false);Result r=PLUGIN_htps_OnlineDownloadToFile(g_htpsOnlineUrl,g_htpsOnlinePath,HTPS_TRANSIENT_MAX_FILE_SIZE);if(R_FAILED(r)){PLUGIN_htps_SetOnlineFailure(g_htpsStageDownload,r);goto fail;}if(!PLUGIN_htps_LoadOnlineTransient(&image))goto fail_delete;MENUOnlineApi api;api.version=HTPS_ONLINE_API_VERSION;api.drawLock=HTTPS_HOST__Draw_Lock;api.drawUnlock=HTTPS_HOST__Draw_Unlock;api.drawClear=HTTPS_HOST__Draw_Clear;api.drawString=HTTPS_HOST__Draw_String;api.drawFlush=HTTPS_HOST__Draw_Flush;api.waitInputWithTimeout=HTTPS_HOST__waitInputWithTimeout;api.menuShouldExit=HTTPS_HOST__menuShouldExit;api.downloadToFile=PLUGIN_htps_OnlineDownloadToFile;api.downloadToMemory=PLUGIN_htps_OnlineDownloadToMemory;api.getFileSize=PLUGIN_htps_GetFileSize;api.readFile=PLUGIN_htps_ReadFile;api.writeFile=PLUGIN_htps_WriteFile;api.setFileSize=PLUGIN_htps_SetFileSize;api.deleteFile=PLUGIN_htps_DeleteFile;api.renameFile=PLUGIN_htps_RenameFile;api.fileExists=PLUGIN_htps_FileExists;api.enumerateDirectory=PLUGIN_htps_EnumerateDirectory;api.sourceUrlPrefix=g_htpsFetchBase;api.addSysplugin=g_httpsHost->addSysplugin;api.disableSysplugin=g_httpsHost->disableSysplugin;api.enableSysplugin=g_httpsHost->enableSysplugin;api.deleteSysplugin=g_httpsHost->deleteSysplugin;((void(*)(const MENUOnlineApi*))image.base)(&api);PLUGIN_htps_FreeOnlineTransient(&image);
-fail_delete:{FS_Archive a=0;if(R_SUCCEEDED(HTTPS_HOST__FSUSER_OpenArchive(&a,ARCHIVE_SDMC,HTTPS_HOST__fsMakePath(PATH_EMPTY,g_httpsOnlineEmptyPath)))){(void)HTTPS_HOST__FSUSER_DeleteFile(a,HTTPS_HOST__fsMakePath(PATH_ASCII,g_htpsOnlinePath));HTTPS_HOST__FSUSER_CloseArchive(a);}}return true;
-fail:PLUGIN_htps_DrawOnlineStatus(g_htpsOnlineError,true);return false;}
+{
+    HtpsTransientImage image;
+    PLUGIN_htps_DrawOnlineStatus(g_htpsWaiting, false);
+    Result r = PLUGIN_htps_OnlineDownloadToFile(g_htpsOnlineUrl, g_htpsOnlinePath, HTPS_TRANSIENT_MAX_FILE_SIZE);
+    if (R_FAILED(r))
+    {
+        PLUGIN_htps_SetOnlineFailure(g_htpsStageDownload, r);
+        goto fail;
+    }
+    bool onlineTransientResult;
+    {
+        FS_Archive archive = 0;
+        Handle file = 0;
+        HtpsTransientHeader h;
+        u64 size64 = 0;
+        u32 codeOffset;
+        u32 dataOffset;
+        u32 end;
+        u32 paddedEnd;
+        u32 totalFileSize;
+        u32 codeSize;
+        u32 dataSize;
+        u32 totalSize;
+        u32 base = 0;
+        u32 allocated = 0;
+        bool memory = false;
+        Result r = 0;
+        ;
+        image.base = (image.codeSize = (image.totalSize = 0));
+        r = HTTPS_HOST__FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, HTTPS_HOST__fsMakePath(PATH_EMPTY, g_httpsOnlineEmptyPath));
+        if (R_FAILED(r))
+        {
+            PLUGIN_htps_SetOnlineFailure(g_htpsStageOpen, r);
+            {
+                onlineTransientResult = false;
+                goto onlineTransientDone;
+            }
+        }
+        r = HTTPS_HOST__FSUSER_OpenFile(&file, archive, HTTPS_HOST__fsMakePath(PATH_ASCII, g_htpsOnlinePath), FS_OPEN_READ, 0);
+        if (R_FAILED(r))
+        {
+            PLUGIN_htps_SetOnlineFailure(g_htpsStageOpen, r);
+            goto onlineTransientFail;
+        }
+        if (R_FAILED(HTTPS_HOST__FSFILE_GetSize(file, &size64)) ||
+            size64 < HTPS_TRANSIENT_HEADER_SIZE || size64 > HTPS_TRANSIENT_MAX_FILE_SIZE ||
+            !PLUGIN_htps_ReadExact(file, 0, &h, sizeof(h)) ||
+            h.magic != HTPS_TRANSIENT_MAGIC || h.plgid != HTPS_ONLINE_ID ||
+            !h.codeSize || (h.metadataSize & 0xFu) ||
+            !PLUGIN_htps_Add32(HTPS_TRANSIENT_HEADER_SIZE, h.fastRelocSize, &codeOffset) ||
+            !PLUGIN_htps_Add32(codeOffset, h.codeSize, &dataOffset) ||
+            !PLUGIN_htps_Add32(dataOffset, h.dataSize, &end) ||
+            !PLUGIN_htps_Add32(end, h.repairSize, &end) ||
+            !PLUGIN_htps_Add32(end, 0xFu, &paddedEnd) ||
+            !PLUGIN_htps_Add32(paddedEnd & ~0xFu, h.metadataSize, &totalFileSize) ||
+            totalFileSize != (u32)size64 ||
+            !PLUGIN_htps_AlignPage(h.codeSize, &codeSize) ||
+            !PLUGIN_htps_Add32(h.dataSize, h.bssSize, &dataSize) ||
+            !PLUGIN_htps_AlignPage(dataSize, &dataSize) ||
+            !PLUGIN_htps_Add32(codeSize, dataSize, &totalSize) ||
+            !totalSize || totalSize > HTPS_TRANSIENT_MAX_RUNTIME_SIZE)
+        {
+            PLUGIN_htps_SetOnlineFailure(g_htpsStageValidate, (Result) 0xD8A0A046u);
+            goto onlineTransientFail;
+        }
+        for (u32 scan = HTTPS_LOW; scan < HTTPS_HIGH;)
+        {
+            MemInfo info;
+            PageInfo page;
+            if (R_FAILED(HTTPS_HOST__svcQueryMemory(&info, &page, scan)))
+                goto onlineTransientNo_memory;
+            if (info.state == MEMSTATE_FREE)
+            {
+                u32 b = (info.base_addr < HTTPS_LOW) ? (HTTPS_LOW) : (info.base_addr);
+                if (b <= (0xFFFFFFFFu - totalSize) && (b + totalSize) <= HTTPS_HIGH && (b + totalSize) <= (info.base_addr + info.size))
+                {
+                    base = b;
+                    break;
+                }
+            }
+            u32 next = info.base_addr + info.size;
+            if (next <= scan)
+                break;
+            scan = next;
+        }
+
+        if (!base)
+            goto onlineTransientNo_memory;
+        r = HTTPS_HOST__svcControlMemoryUnsafe(&allocated, base, totalSize, MEMOP_ALLOC | MEMOP_REGION_SYSTEM, MEMPERM_READWRITE);
+        if (R_FAILED(r) || !allocated)
+            goto onlineTransientNo_memory;
+        base = allocated;
+        memory = true;
+        if (!PLUGIN_htps_ReadExact(file, codeOffset, (void *) base, h.codeSize) || (h.dataSize && !PLUGIN_htps_ReadExact(file, dataOffset, (void *) (base + codeSize), h.dataSize)))
+        {
+            PLUGIN_htps_SetOnlineFailure(g_htpsStageValidate, (Result) 0xD8A0A048u);
+            goto onlineTransientFail;
+        }
+        for (u32 i = 0; i < h.bssSize; i++)
+            *((volatile u8 *) (base + codeSize + h.dataSize + i)) = 0;
+
+        {
+            u32 group[2];
+            if (h.fastRelocSize < 8u || !PLUGIN_htps_ReadExact(file, HTPS_TRANSIENT_HEADER_SIZE, group, 8u) || group[0] != HTPS_ONLINE_ID || group[1] != ((h.fastRelocSize - 8u) / 8u) || (8u + group[1] * 8u) != h.fastRelocSize)
+            {
+                PLUGIN_htps_SetOnlineFailure(g_htpsStageReloc, (Result) 0xD8A0A049u);
+                goto onlineTransientFail;
+            }
+            u32 pos = HTPS_TRANSIENT_HEADER_SIZE + 8u;
+            for (u32 i = 0; i < group[1]; i++, pos += 8u)
+            {
+                u32 pair[2];
+                if (!PLUGIN_htps_ReadExact(file, pos, pair, 8u) || pair[0] & 3u || pair[0] > (totalSize - 4u) || pair[1] >= totalSize)
+                {
+                    PLUGIN_htps_SetOnlineFailure(g_htpsStageReloc, (Result) 0xD8A0A049u);
+                    goto onlineTransientFail;
+                }
+                *((volatile u32 *) (base + pair[0])) = base + pair[1];
+            }
+
+        }
+        HTTPS_HOST__FSFILE_Close(file);
+        file = 0;
+        HTTPS_HOST__FSUSER_CloseArchive(archive);
+        archive = 0;
+        HTTPS_HOST__svcFlushEntireDataCache();
+        r = HTTPS_HOST__protectMemory(base, codeSize, MEMPERM_READEXECUTE);
+        if (R_FAILED(r))
+        {
+            PLUGIN_htps_SetOnlineFailure(g_htpsStageProtect, r);
+            goto onlineTransientFail;
+        }
+        HTTPS_HOST__svcInvalidateEntireInstructionCache();
+        image.base = base;
+        image.codeSize = codeSize;
+        image.totalSize = totalSize;
+        {
+            onlineTransientResult = true;
+            goto onlineTransientDone;
+        }
+        onlineTransientNo_memory:
+        PLUGIN_htps_SetOnlineFailure(g_htpsStageMemory, (R_FAILED(r)) ? (r) : ((Result) 0xD8A0A047u));
+
+        onlineTransientFail:
+        if (file)
+            HTTPS_HOST__FSFILE_Close(file);
+
+        if (archive)
+            HTTPS_HOST__FSUSER_CloseArchive(archive);
+        if (memory)
+        {
+            u32 out;
+            (void) HTTPS_HOST__svcControlMemoryUnsafe(&out, base, totalSize, MEMOP_FREE | MEMOP_REGION_SYSTEM, MEMPERM_DONTCARE);
+        }
+        onlineTransientResult = false;
+        onlineTransientDone:;
+
+    }
+    if (!onlineTransientResult)
+        goto fail_delete;
+    MENUOnlineApi api;
+    api.version = HTPS_ONLINE_API_VERSION;
+    api.drawLock = HTTPS_HOST__Draw_Lock;
+    api.drawUnlock = HTTPS_HOST__Draw_Unlock;
+    api.drawClear = HTTPS_HOST__Draw_Clear;
+    api.drawString = HTTPS_HOST__Draw_String;
+    api.drawFlush = HTTPS_HOST__Draw_Flush;
+    api.waitInputWithTimeout = HTTPS_HOST__waitInputWithTimeout;
+    api.menuShouldExit = HTTPS_HOST__menuShouldExit;
+    api.downloadToFile = PLUGIN_htps_OnlineDownloadToFile;
+    api.downloadToMemory = PLUGIN_htps_OnlineDownloadToMemory;
+    api.getFileSize = PLUGIN_htps_GetFileSize;
+    api.readFile = PLUGIN_htps_ReadFile;
+    api.writeFile = PLUGIN_htps_WriteFile;
+    api.setFileSize = PLUGIN_htps_SetFileSize;
+    api.deleteFile = PLUGIN_htps_DeleteFile;
+    api.renameFile = PLUGIN_htps_RenameFile;
+    api.fileExists = PLUGIN_htps_FileExists;
+    api.enumerateDirectory = PLUGIN_htps_EnumerateDirectory;
+    api.sourceUrlPrefix = g_htpsFetchBase;
+    api.addSysplugin = g_httpsHost->addSysplugin;
+    api.disableSysplugin = g_httpsHost->disableSysplugin;
+    api.enableSysplugin = g_httpsHost->enableSysplugin;
+    api.deleteSysplugin = g_httpsHost->deleteSysplugin;
+    ((void (*)(const MENUOnlineApi *)) image.base)(&api);
+    {
+        if (!image.base)
+            goto onlineTransientDone2;
+        (void) HTTPS_HOST__protectMemory(image.base, image.codeSize, MEMPERM_READWRITE);
+        u32 out;
+        (void) HTTPS_HOST__svcControlMemoryUnsafe(&out, image.base, image.totalSize, MEMOP_FREE | MEMOP_REGION_SYSTEM, MEMPERM_DONTCARE);
+        image.base = 0;
+        onlineTransientDone2:;
+
+    }
+    fail_delete:
+    {
+        FS_Archive a = 0;
+        if (R_SUCCEEDED(HTTPS_HOST__FSUSER_OpenArchive(&a, ARCHIVE_SDMC, HTTPS_HOST__fsMakePath(PATH_EMPTY, g_httpsOnlineEmptyPath))))
+        {
+            (void) HTTPS_HOST__FSUSER_DeleteFile(a, HTTPS_HOST__fsMakePath(PATH_ASCII, g_htpsOnlinePath));
+            HTTPS_HOST__FSUSER_CloseArchive(a);
+        }
+    }
+
+    return true;
+    fail:
+    PLUGIN_htps_DrawOnlineStatus(g_htpsOnlineError, true);
+
+    return false;
+}
 PLUGIN_CODE(htps) static void PLUGIN_htps_OpenOnlineSource(const char *url)
 {
     if (!PLUGIN_htps_SetSourceUrl(url))
@@ -1599,72 +1901,203 @@ PLUGIN_CODE(htps) static void PLUGIN_htps_OpenOnlineSource(const char *url)
         (void)PLUGIN_htps_RunOnlineSource();
 }
 
+#define HTTPSLIB_SOURCE 1
+#include "httpslib_sources.c"
+#undef HTTPSLIB_SOURCE
+
 PLUGIN_CODE(htps) static void PLUGIN_htps_OpenOnlineMenu(void)
 {
-    u32 count = 0, selected = 0, first = 0;
+    u32 count = 0;
+    u32 selected = 0;
+    u32 first = 0;
     bool redraw = true;
+    bool fetchSourcesResult2;
+    {
+        u32 *fetchSourcesCountOut2 = &count;
+        FS_Archive a = 0;
+        Handle f = 0;
+        u64 n = 0;
+        u32 count = 0;
+        bool ok = false;
+        Result r;
+        if (!fetchSourcesCountOut2)
+        {
+            fetchSourcesResult2 = false;
+            goto fetchSourcesDone3;
+        }
+        *fetchSourcesCountOut2 = 0;
+        if (R_FAILED(HTTPS_HOST__FSUSER_OpenArchive(&a, ARCHIVE_SDMC, HTTPS_HOST__fsMakePath(PATH_EMPTY, g_httpsOnlineEmptyPath))))
+        {
+            fetchSourcesResult2 = false;
+            goto fetchSourcesDone3;
+        }
+        r = HTTPS_HOST__FSUSER_OpenFile(&f, a, HTTPS_HOST__fsMakePath(PATH_ASCII, g_htpsFetchPath), FS_OPEN_READ, 0);
+        if (R_FAILED(r))
+        {
+            r = HTTPS_HOST__FSUSER_OpenFile(&f, a, HTTPS_HOST__fsMakePath(PATH_ASCII, g_htpsFetchPath), FS_OPEN_WRITE | FS_OPEN_CREATE, 0);
+            if (R_FAILED(r))
+                goto fetchSourcesDone2;
+            if (R_FAILED(HTTPS_HOST__FSFILE_Close(f)))
+            {
+                f = 0;
+                goto fetchSourcesDone2;
+            }
+            f = 0;
+            r = HTTPS_HOST__FSUSER_OpenFile(&f, a, HTTPS_HOST__fsMakePath(PATH_ASCII, g_htpsFetchPath), FS_OPEN_READ, 0);
+            if (R_FAILED(r))
+                goto fetchSourcesDone2;
+        }
+        if (R_FAILED(HTTPS_HOST__FSFILE_GetSize(f, &n)) || n >= sizeof(g_htpsFetchConfig) || (n && !PLUGIN_htps_ReadExact(f, 0, g_htpsFetchConfig, (u32) n)))
+            goto fetchSourcesDone2;
+        g_htpsFetchConfig[(u32) n] = 0;
+        char *cur = g_htpsFetchConfig;
+        while (count < HTPS_FETCH_MAX_SOURCES)
+        {
+            char *t = PLUGIN_htps_NextFetchLine(&cur);
+            if (!t)
+                break;
+            char *u = PLUGIN_htps_NextFetchLine(&cur);
+            if (!u)
+                goto fetchSourcesDone2;
+            g_htpsFetchSources[count].title = t;
+            g_htpsFetchSources[count].url = u;
+            count++;
+        }
 
-    if (!PLUGIN_htps_LoadFetchSources(&count))
+        if (PLUGIN_htps_NextFetchLine(&cur))
+            goto fetchSourcesDone2;
+        *fetchSourcesCountOut2 = count;
+        ok = true;
+        fetchSourcesDone2:
+        if (f)
+            HTTPS_HOST__FSFILE_Close(f);
+
+        if (a)
+            HTTPS_HOST__FSUSER_CloseArchive(a);
+        fetchSourcesResult2 = ok;
+        fetchSourcesDone3:;
+
+    }
+    if (!fetchSourcesResult2)
     {
         PLUGIN_htps_DrawFetchError();
         return;
     }
     if (!count)
     {
-        PLUGIN_htps_DrawNoSources();
+        HTTPS_HOST__Draw_Lock();
+        HTTPS_HOST__Draw_Clear();
+        PLUGIN_htps_DrawChooserFrame();
+        HTTPS_HOST__Draw_String(35, 45, 0x7BEFu, g_htpsNoSources);
+        HTTPS_HOST__Draw_String(35, 67, 0x7BEFu, g_htpsNoSourcesIntro);
+        // Light blue (128, 192, 255).
+        HTTPS_HOST__Draw_String(35, 78, 0x861Fu, g_htpsNoSourcesPath);
+        HTTPS_HOST__Draw_String(35, 89, 0x7BEFu, g_htpsNoSourcesBody);
+        HTTPS_HOST__Draw_String(35, 111, 0x7BEFu, g_htpsNoSourcesDiscord);
+        HTTPS_HOST__Draw_Flush();
+        HTTPS_HOST__Draw_Unlock();
+        while (!(*HTTPS_HOST__menuShouldExit))
+            if (HTTPS_HOST__waitInputWithTimeout(-1) & KEY_B)
+            break;
+
         return;
     }
-
-    while (!*HTTPS_HOST__menuShouldExit)
+    while (!(*HTTPS_HOST__menuShouldExit))
     {
-        if (count <= HTPS_VISIBLE_ITEMS) first = 0;
+        if (count <= HTPS_VISIBLE_ITEMS)
+            first = 0;
         else
         {
-            if (first > selected) first = selected;
-            if (selected >= first + HTPS_VISIBLE_ITEMS) first = selected - HTPS_VISIBLE_ITEMS + 1u;
-            if (first > count - HTPS_VISIBLE_ITEMS) first = count - HTPS_VISIBLE_ITEMS;
+            if (first > selected)
+                first = selected;
+            if (selected >= (first + HTPS_VISIBLE_ITEMS))
+                first = selected - HTPS_VISIBLE_ITEMS + 1u;
+            if (first > (count - HTPS_VISIBLE_ITEMS))
+                first = count - HTPS_VISIBLE_ITEMS;
         }
-
         if (redraw)
         {
-            PLUGIN_htps_DrawChooser(first, selected, count);
+            {
+                u32 drawChooserCount = count;
+                u32 shown = drawChooserCount - first;
+                if (shown > HTPS_VISIBLE_ITEMS)
+                    shown = HTPS_VISIBLE_ITEMS;
+                HTTPS_HOST__Draw_Lock();
+                HTTPS_HOST__Draw_Clear();
+                PLUGIN_htps_DrawChooserFrame();
+                if (first)
+                    HTTPS_HOST__Draw_String(35, 34, 0x7BEFu, g_htpsDots);
+                for (u32 i = 0; i < shown; i++)
+                    PLUGIN_htps_DrawChooserItem(45u + i * 11u, (first + i) == selected, g_htpsFetchSources[first + i].title);
+
+                if ((first + shown) < drawChooserCount)
+                    HTTPS_HOST__Draw_String(35, 45u + HTPS_VISIBLE_ITEMS * 11u, 0x7BEFu, g_htpsDots);
+                HTTPS_HOST__Draw_Flush();
+                HTTPS_HOST__Draw_Unlock();
+            }
             redraw = false;
         }
-
         u32 pressed = HTTPS_HOST__waitInputWithTimeout(-1);
-        if (pressed & KEY_B) return;
+        if (pressed & KEY_B)
+            return;
         if (pressed & KEY_DOWN)
         {
-            u32 oldSelected = selected, oldFirst = first;
-            if (selected + 1u >= count) { selected = 0; first = 0; }
-            else { selected++; if (selected >= first + HTPS_VISIBLE_ITEMS) first++; }
-            if (first != oldFirst) redraw = true;
-            else if (selected != oldSelected) PLUGIN_htps_RedrawChooserSelection(first, oldSelected, selected);
+            u32 oldSelected = selected;
+            u32 oldFirst = first;
+            if ((selected + 1u) >= count)
+            {
+                selected = 0;
+                first = 0;
+            }
+            else
+            {
+                selected++;
+                if (selected >= (first + HTPS_VISIBLE_ITEMS))
+                    first++;
+            }
+            if (first != oldFirst)
+                redraw = true;
+            else if (selected != oldSelected)
+                PLUGIN_htps_RedrawChooserSelection(first, oldSelected, selected);
         }
         else if (pressed & KEY_UP)
         {
-            u32 oldSelected = selected, oldFirst = first;
-            if (!selected) { selected = count - 1u; first = count > HTPS_VISIBLE_ITEMS ? count - HTPS_VISIBLE_ITEMS : 0u; }
-            else { selected--; if (selected < first) first--; }
-            if (first != oldFirst) redraw = true;
-            else if (selected != oldSelected) PLUGIN_htps_RedrawChooserSelection(first, oldSelected, selected);
+            u32 oldSelected = selected;
+            u32 oldFirst = first;
+            if (!selected)
+            {
+                selected = count - 1u;
+                first = (count > HTPS_VISIBLE_ITEMS) ? (count - HTPS_VISIBLE_ITEMS) : (0u);
+            }
+            else
+            {
+                selected--;
+                if (selected < first)
+                    first--;
+            }
+            if (first != oldFirst)
+                redraw = true;
+            else if (selected != oldSelected)
+                PLUGIN_htps_RedrawChooserSelection(first, oldSelected, selected);
         }
         else if (pressed & KEY_A)
         {
             if (!PLUGIN_htps_SetSourceUrl(g_htpsFetchSources[selected].url))
                 PLUGIN_htps_DrawFetchError();
             else if (PLUGIN_htps_ConfirmSource())
-                (void)PLUGIN_htps_RunOnlineSource();
-            if (*HTTPS_HOST__menuShouldExit) return;
+                (void) PLUGIN_htps_RunOnlineSource();
+            if (*HTTPS_HOST__menuShouldExit)
+                return;
             redraw = true;
         }
     }
-}
 
+}
 
 PLUGIN_MAIN(htps) bool PLUGIN_htps_Main(const MENUHttpsHostApi *host, MENUHttpsApi *api)
 {
-    if (!host || !api || host->version != MENU_HTTPS_HOST_API_VERSION || !host->hostTable || !host->protectMemory)
+    if (!host || !api || host->version != MENU_HTTPS_HOST_API_VERSION || !host->hostTable || !host->protectMemory ||
+        !host->readTouch || !host->addOnlineEntry || !host->removeOnlineEntry)
         return false;
     for (u32 i = 1; i <= 41u; i++) if (!host->hostTable[i]) return false;
     g_httpsHost = host;

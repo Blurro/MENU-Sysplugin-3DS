@@ -25,21 +25,6 @@ PLUGIN_CODE(MENU) static s32 PLUGIN_MENU_StringCompare(const char *a, const char
     return (s32)(u8)*left - (s32)(u8)*right;
 }
 
-PLUGIN_CODE(MENU) static void PLUGIN_MENU_CopyString(char *dst, const char *src, u32 size)
-{
-    volatile char *out = dst;
-    const volatile char *in = src;
-    u32 i = 0;
-
-    while (i + 1u < size && in[i])
-    {
-        out[i] = in[i];
-        i++;
-    }
-
-    out[i] = 0;
-}
-
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_Add32(u32 a, u32 b, u32 *out)
 {
     u32 value = a + b;
@@ -74,29 +59,6 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_WriteExact(
     return !size ||
         (R_SUCCEEDED(MENU_HOST__FSFILE_Write(file, &written, offset, buffer, size, FS_WRITE_FLUSH)) &&
          written == size);
-}
-
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ReadBufferRange(
-    Handle file,
-    u64 offset,
-    void *buffer,
-    u32 size
-)
-{
-    u8 *out = (u8*)buffer;
-
-    while (size)
-    {
-        u32 chunk = size < MENU_DATA_COPY_CHUNK ? size : MENU_DATA_COPY_CHUNK;
-        if (!PLUGIN_MENU_ReadExact(file, offset, out, chunk))
-            return false;
-
-        offset += chunk;
-        out += chunk;
-        size -= chunk;
-    }
-
-    return true;
 }
 
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_WriteBufferRange(
@@ -233,41 +195,26 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_GetDataSize(u32 pluginId, u32 *sizeOut)
 {
     if (!pluginId || !sizeOut)
         return false;
-
     bool found = false;
     FS_Archive archive;
     Handle file;
-
-    PLUGIN_MENU_LockData();
-
-    if (R_SUCCEEDED(MENU_HOST__FSUSER_OpenArchive(
-            &archive,
-            ARCHIVE_SDMC,
-            MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
+    PLUGIN_MENU_LockWord(&g_MENUDataLock);
+    if (R_SUCCEEDED(MENU_HOST__FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
     {
-        if (R_SUCCEEDED(MENU_HOST__FSUSER_OpenFile(
-                &file,
-                archive,
-                MENU_HOST__fsMakePath(PATH_ASCII, g_MENUStatePath),
-                FS_OPEN_READ,
-                0)))
+        if (R_SUCCEEDED(MENU_HOST__FSUSER_OpenFile(&file, archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUStatePath), FS_OPEN_READ, 0)))
         {
             PluginMenuDataHeader header;
             PluginMenuDataEntry entry;
-            if (PLUGIN_MENU_ValidateDataFile(file, &header, NULL) &&
-                PLUGIN_MENU_FindDataEntry(file, &header, pluginId, &entry))
+            if (PLUGIN_MENU_ValidateDataFile(file, &header, NULL) && PLUGIN_MENU_FindDataEntry(file, &header, pluginId, &entry))
             {
                 *sizeOut = entry.size;
                 found = true;
             }
-
             MENU_HOST__FSFILE_Close(file);
         }
-
         MENU_HOST__FSUSER_CloseArchive(archive);
     }
-
-    PLUGIN_MENU_UnlockData();
+    PLUGIN_MENU_UnlockWord(&g_MENUDataLock);
     return found;
 }
 
@@ -275,46 +222,48 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_LoadData(u32 pluginId, void *data, u32 size)
 {
     if (!pluginId || (size && !data))
         return false;
-
     bool loaded = false;
     FS_Archive archive;
     Handle file;
-
-    PLUGIN_MENU_LockData();
-
-    if (R_SUCCEEDED(MENU_HOST__FSUSER_OpenArchive(
-            &archive,
-            ARCHIVE_SDMC,
-            MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
+    PLUGIN_MENU_LockWord(&g_MENUDataLock);
+    if (R_SUCCEEDED(MENU_HOST__FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
     {
-        if (R_SUCCEEDED(MENU_HOST__FSUSER_OpenFile(
-                &file,
-                archive,
-                MENU_HOST__fsMakePath(PATH_ASCII, g_MENUStatePath),
-                FS_OPEN_READ,
-                0)))
+        if (R_SUCCEEDED(MENU_HOST__FSUSER_OpenFile(&file, archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUStatePath), FS_OPEN_READ, 0)))
         {
             PluginMenuDataHeader header;
             PluginMenuDataEntry entry;
-            if (PLUGIN_MENU_ValidateDataFile(file, &header, NULL) &&
-                PLUGIN_MENU_FindDataEntry(file, &header, pluginId, &entry) &&
-                entry.size == size)
+            if (PLUGIN_MENU_ValidateDataFile(file, &header, NULL) && PLUGIN_MENU_FindDataEntry(file, &header, pluginId, &entry) && entry.size == size)
             {
-                loaded = PLUGIN_MENU_ReadBufferRange(
-                    file,
-                    (u64)entry.offset + sizeof(u32),
-                    data,
-                    size
-                );
-            }
+                bool bufferRangeResult;
+                {
+                    Handle bufferRangeFile = file;
+                    u64 bufferRangeOffset = (u64) entry.offset + sizeof(u32);
+                    u32 bufferRangeSize = size;
+                    u8 *out = (u8 *) data;
+                    while (bufferRangeSize)
+                    {
+                        u32 chunk = (bufferRangeSize < MENU_DATA_COPY_CHUNK) ? (bufferRangeSize) : (MENU_DATA_COPY_CHUNK);
+                        if (!PLUGIN_MENU_ReadExact(bufferRangeFile, bufferRangeOffset, out, chunk))
+                        {
+                            bufferRangeResult = false;
+                            goto bufferRangeDone;
+                        }
+                        bufferRangeOffset += chunk;
+                        out += chunk;
+                        bufferRangeSize -= chunk;
+                    }
 
+                    bufferRangeResult = true;
+                    bufferRangeDone:;
+
+                }
+                loaded = bufferRangeResult;
+            }
             MENU_HOST__FSFILE_Close(file);
         }
-
         MENU_HOST__FSUSER_CloseArchive(archive);
     }
-
-    PLUGIN_MENU_UnlockData();
+    PLUGIN_MENU_UnlockWord(&g_MENUDataLock);
     return loaded;
 }
 
@@ -415,8 +364,7 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_SaveData(u32 pluginId, const void *data, u32 
         return false;
     if (!PLUGIN_MENU_TempAlloc(0x1000u, &scratchBase))
         return false;
-    scratch = (u8 *)scratchBase;
-
+    scratch = (u8 *) scratchBase;
     bool success = false;
     bool oldOpen = false;
     FS_Archive archive;
@@ -427,23 +375,12 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_SaveData(u32 pluginId, const void *data, u32 
     u32 oldCount = 0;
     u32 preservedBytes = 0;
     bool replacing = false;
-
-    PLUGIN_MENU_LockData();
-
-    if (R_FAILED(MENU_HOST__FSUSER_OpenArchive(
-            &archive,
-            ARCHIVE_SDMC,
-            MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
+    PLUGIN_MENU_LockWord(&g_MENUDataLock);
+    if (R_FAILED(MENU_HOST__FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, MENU_HOST__fsMakePath(PATH_EMPTY, g_MENUEmptyPath))))
     {
         goto done;
     }
-
-    if (R_SUCCEEDED(MENU_HOST__FSUSER_OpenFile(
-            &oldFile,
-            archive,
-            MENU_HOST__fsMakePath(PATH_ASCII, g_MENUStatePath),
-            FS_OPEN_READ,
-            0)))
+    if (R_SUCCEEDED(MENU_HOST__FSUSER_OpenFile(&oldFile, archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUStatePath), FS_OPEN_READ, 0)))
     {
         oldOpen = true;
         if (PLUGIN_MENU_ValidateDataFile(oldFile, &oldHeader, NULL))
@@ -453,18 +390,30 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_SaveData(u32 pluginId, const void *data, u32 
             {
                 PluginMenuDataEntry entry;
                 u32 blockSize;
-
-                if (!PLUGIN_MENU_ReadDataEntry(oldFile, i, &entry) ||
-                    !PLUGIN_MENU_Add32(sizeof(u32), entry.size, &blockSize))
+                if (!PLUGIN_MENU_ReadDataEntry(oldFile, i, &entry) || !PLUGIN_MENU_Add32(sizeof(u32), entry.size, &blockSize))
                 {
                     oldCount = 0;
                     preservedBytes = 0;
                     replacing = false;
                     break;
                 }
-
                 if (entry.pluginId == pluginId)
+                {
                     replacing = true;
+                    // A same-size payload keeps the existing table and other records intact.
+                    if (entry.size == size)
+                    {
+                        MENU_HOST__FSFILE_Close(oldFile);
+                        oldOpen = false;
+                        if (R_FAILED(MENU_HOST__FSUSER_OpenFile(&stateFile, archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUStatePath), FS_OPEN_READ | FS_OPEN_WRITE, 0)))
+                        {
+                            goto close_archive;
+                        }
+                        success = PLUGIN_MENU_WriteBufferRange(stateFile, (u64) entry.offset + sizeof(u32), data, size);
+                        MENU_HOST__FSFILE_Close(stateFile);
+                        goto close_archive;
+                    }
+                }
                 else if (!PLUGIN_MENU_Add32(preservedBytes, blockSize, &preservedBytes))
                 {
                     oldCount = 0;
@@ -473,165 +422,99 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_SaveData(u32 pluginId, const void *data, u32 
                     break;
                 }
             }
+
         }
     }
-
-    u32 newCount = oldCount + (replacing ? 0u : 1u);
+    u32 newCount = oldCount + ((replacing) ? (0u) : (1u));
     u32 tableBytes;
     u32 tableEnd;
     u32 targetBytes;
     u32 finalSize;
-
-    if (newCount < oldCount ||
-        newCount > (0xFFFFFFFFu - sizeof(PluginMenuDataHeader)) / sizeof(PluginMenuDataEntry) ||
-        !PLUGIN_MENU_Add32(sizeof(u32), size, &targetBytes))
+    if (newCount < oldCount || newCount > ((0xFFFFFFFFu - sizeof(PluginMenuDataHeader)) / sizeof(PluginMenuDataEntry)) || !PLUGIN_MENU_Add32(sizeof(u32), size, &targetBytes))
     {
         goto close_archive;
     }
-
     tableBytes = newCount * sizeof(PluginMenuDataEntry);
-    if (!PLUGIN_MENU_Add32(sizeof(PluginMenuDataHeader), tableBytes, &tableEnd) ||
-        !PLUGIN_MENU_Add32(tableEnd, preservedBytes, &finalSize) ||
-        !PLUGIN_MENU_Add32(finalSize, targetBytes, &finalSize))
+    if (!PLUGIN_MENU_Add32(sizeof(PluginMenuDataHeader), tableBytes, &tableEnd) || !PLUGIN_MENU_Add32(tableEnd, preservedBytes, &finalSize) || !PLUGIN_MENU_Add32(finalSize, targetBytes, &finalSize))
     {
         goto close_archive;
     }
-
-    if (R_FAILED(MENU_HOST__FSUSER_OpenFile(
-            &tempFile,
-            archive,
-            MENU_HOST__fsMakePath(PATH_ASCII, g_MENUTempPath),
-            FS_OPEN_READ | FS_OPEN_WRITE | FS_OPEN_CREATE,
-            0)) ||
-        R_FAILED(MENU_HOST__FSFILE_SetSize(tempFile, finalSize)))
+    if (R_FAILED(MENU_HOST__FSUSER_OpenFile(&tempFile, archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUTempPath), (FS_OPEN_READ | FS_OPEN_WRITE) | FS_OPEN_CREATE, 0)))
     {
         goto close_archive;
     }
-
+    u64 fileSize;
+    if (R_FAILED(MENU_HOST__FSFILE_GetSize(tempFile, &fileSize)) || (fileSize != finalSize && R_FAILED(MENU_HOST__FSFILE_SetSize(tempFile, finalSize))))
+    {
+        goto close_temp;
+    }
     PluginMenuDataHeader newHeader;
     newHeader.count = newCount;
-
     if (!PLUGIN_MENU_WriteExact(tempFile, 0, &newHeader, sizeof(newHeader)))
         goto close_temp;
-
     u32 tableIndex = 0;
     u32 dataOffset = tableEnd;
     bool targetWritten = false;
-
     for (u32 i = 0; i < oldCount; i++)
     {
         PluginMenuDataEntry entry;
         if (!PLUGIN_MENU_ReadDataEntry(oldFile, i, &entry))
             goto close_temp;
-
         if (!targetWritten && pluginId < entry.pluginId)
         {
-            if (!PLUGIN_MENU_WriteDataRecord(
-                    tempFile,
-                    oldFile,
-                    false,
-                    NULL,
-                    tableIndex++,
-                    &dataOffset,
-                    pluginId,
-                    data,
-                    size,
-                    scratch))
+            if (!PLUGIN_MENU_WriteDataRecord(tempFile, oldFile, false, NULL, tableIndex++, &dataOffset, pluginId, data, size, scratch))
             {
                 goto close_temp;
             }
             targetWritten = true;
         }
-
         if (entry.pluginId == pluginId)
         {
-            if (!PLUGIN_MENU_WriteDataRecord(
-                    tempFile,
-                    oldFile,
-                    false,
-                    NULL,
-                    tableIndex++,
-                    &dataOffset,
-                    pluginId,
-                    data,
-                    size,
-                    scratch))
+            if (!PLUGIN_MENU_WriteDataRecord(tempFile, oldFile, false, NULL, tableIndex++, &dataOffset, pluginId, data, size, scratch))
             {
                 goto close_temp;
             }
             targetWritten = true;
         }
-        else if (!PLUGIN_MENU_WriteDataRecord(
-                    tempFile,
-                    oldFile,
-                    true,
-                    &entry,
-                    tableIndex++,
-                    &dataOffset,
-                    entry.pluginId,
-                    NULL,
-                    entry.size,
-                    scratch))
+        else if (!PLUGIN_MENU_WriteDataRecord(tempFile, oldFile, true, &entry, tableIndex++, &dataOffset, entry.pluginId, NULL, entry.size, scratch))
         {
             goto close_temp;
         }
     }
 
-    if (!targetWritten &&
-        !PLUGIN_MENU_WriteDataRecord(
-            tempFile,
-            oldFile,
-            false,
-            NULL,
-            tableIndex++,
-            &dataOffset,
-            pluginId,
-            data,
-            size,
-            scratch))
+    if (!targetWritten && !PLUGIN_MENU_WriteDataRecord(tempFile, oldFile, false, NULL, tableIndex++, &dataOffset, pluginId, data, size, scratch))
     {
         goto close_temp;
     }
-
     if (tableIndex != newCount || dataOffset != finalSize)
         goto close_temp;
-
     if (oldOpen)
     {
         MENU_HOST__FSFILE_Close(oldFile);
         oldOpen = false;
     }
-
-    if (R_FAILED(MENU_HOST__FSUSER_OpenFile(
-            &stateFile,
-            archive,
-            MENU_HOST__fsMakePath(PATH_ASCII, g_MENUStatePath),
-            FS_OPEN_READ | FS_OPEN_WRITE | FS_OPEN_CREATE,
-            0)) ||
-        R_FAILED(MENU_HOST__FSFILE_SetSize(stateFile, finalSize)) ||
-        !PLUGIN_MENU_CopyDataRange(tempFile, 0, stateFile, 0, finalSize, scratch))
+    if (R_FAILED(MENU_HOST__FSUSER_OpenFile(&stateFile, archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUStatePath), (FS_OPEN_READ | FS_OPEN_WRITE) | FS_OPEN_CREATE, 0)) || R_FAILED(MENU_HOST__FSFILE_GetSize(stateFile, &fileSize)) || (fileSize != finalSize && R_FAILED(MENU_HOST__FSFILE_SetSize(stateFile, finalSize))) || !PLUGIN_MENU_CopyDataRange(tempFile, 0, stateFile, 0, finalSize, scratch))
     {
         goto close_state;
     }
-
     success = true;
-
-close_state:
+    close_state:
     if (stateFile)
         MENU_HOST__FSFILE_Close(stateFile);
-close_temp:
+
+    close_temp:
     if (tempFile)
         MENU_HOST__FSFILE_Close(tempFile);
-    (void)MENU_HOST__FSUSER_DeleteFile(
-        archive,
-        MENU_HOST__fsMakePath(PATH_ASCII, g_MENUTempPath)
-    );
-close_archive:
+
+    (void) MENU_HOST__FSUSER_DeleteFile(archive, MENU_HOST__fsMakePath(PATH_ASCII, g_MENUTempPath));
+    close_archive:
     if (oldOpen)
         MENU_HOST__FSFILE_Close(oldFile);
+
     MENU_HOST__FSUSER_CloseArchive(archive);
-done:
-    PLUGIN_MENU_UnlockData();
+    done:
+    PLUGIN_MENU_UnlockWord(&g_MENUDataLock);
+
     PLUGIN_MENU_TempFree(scratchBase, 0x1000u);
     return success;
 }

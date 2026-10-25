@@ -32,35 +32,44 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_FindFreeRange(u32 size, u32 *outBase)
 {
     MemInfo memInfo;
     PageInfo pageInfo;
-    u32 scan = MENU_SCRATCH_LOW;
+    // start high to follow K11 sysplugin loading style for Loader (Rosalina starts low)
+    u32 scan = MENU_SCRATCH_HIGH - 1u;
 
-    if (!outBase || !size || (size & 0xFFFu))
-        return false;
-
-    while (scan < MENU_SCRATCH_HIGH)
+    if (!outBase || !size || (size & 0xFFFu) ||
+        size > MENU_SCRATCH_HIGH - MENU_SCRATCH_LOW)
     {
-        u32 end;
+        return false;
+    }
+
+    while (scan >= MENU_SCRATCH_LOW && scan < MENU_SCRATCH_HIGH)
+    {
         if (R_FAILED(PLUGIN_MENU_svcQueryMemory(&memInfo, &pageInfo, scan)))
             return false;
 
-        end = memInfo.base_addr + memInfo.size;
-        if (end <= scan)
-            return false;
+        u32 end = memInfo.base_addr + memInfo.size;
+        if (end < memInfo.base_addr)
+            end = 0xFFFFFFFFu;
 
         if (memInfo.state == MEMSTATE_FREE)
         {
-            u32 base = (memInfo.base_addr + 0xFFFu) & ~0xFFFu;
-            if (base < MENU_SCRATCH_LOW)
-                base = MENU_SCRATCH_LOW;
+            u32 rangeLow = memInfo.base_addr > MENU_SCRATCH_LOW ? memInfo.base_addr : MENU_SCRATCH_LOW;
+            u32 rangeHigh = end < MENU_SCRATCH_HIGH ? end : MENU_SCRATCH_HIGH;
 
-            if (base < end && size <= end - base && size <= MENU_SCRATCH_HIGH - base)
+            if (rangeHigh >= rangeLow && size <= rangeHigh - rangeLow)
             {
-                *outBase = base;
-                return true;
+                u32 base = (rangeHigh - size) & ~0xFFFu;
+                if (base >= rangeLow && size <= rangeHigh - base)
+                {
+                    *outBase = base;
+                    return true;
+                }
             }
         }
 
-        scan = end;
+        if (memInfo.base_addr <= MENU_SCRATCH_LOW)
+            break;
+
+        scan = memInfo.base_addr - 1u;
     }
     return false;
 }
@@ -129,6 +138,7 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_FreeAliasGuard(u32 address)
     );
 }
 
+// ALWAYS use as a safe replacement for MapProcessMemoryEx!
 PLUGIN_CODE(MENU) bool PLUGIN_MENU_MapPage(
     Handle sourceProcess,
     u32 sourceAddress,
@@ -136,6 +146,8 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_MapPage(
     u32 *mappedAddress
 )
 {
+    // maps [guard page][alias page][guard page]
+    // because unmap ex func has a bug upon freeing an alias if that alias landed after another alias, in which is frees the entire alias size (more than specified) but from the base you specified
     u32 guardBase;
     u32 aliasBase;
     u32 page = sourceAddress & ~0xFFFu;
@@ -171,6 +183,7 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_MapPage(
     return true;
 }
 
+// of course use only for maps using MENU MapPage (dont use map...ex funcs)
 PLUGIN_CODE(MENU) void PLUGIN_MENU_UnmapPage(u32 mappedBase)
 {
     if (!mappedBase)

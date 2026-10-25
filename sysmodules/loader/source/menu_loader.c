@@ -21,6 +21,11 @@ extern void patchCode(
     u32 roAddress,
     u32 dataAddress
 );
+// MENU trampoline for the original host patchCode() prologue.
+extern void PLUGIN_MENU_PatchCodeOriginal(
+    u64 progId, u16 progVer, u8 *code, u32 size, u32 textSize,
+    u32 roSize, u32 dataSize, u32 roAddress, u32 dataAddress
+);
 extern Result svcCloseHandle(Handle handle);
 extern Result plgldrInit(void);
 extern void svcSleepThread(s64 ns);
@@ -45,13 +50,13 @@ PLUGIN_DATA(MENU) void *pluginTable_MENU[] = {
     (void *)svcConnectToPort,
     (void *)svcSendSyncRequest,
     (void *)&menu_loader_plgldr_init_call,
+    (void *)svcCreateCodeSet,
+    (void *)svcCreateProcess,
 };
 
-#define MENU_HOST__patchCode \
-    ((void(*)(u64,u16,u8*,u32,u32,u32,u32,u32,u32))pluginTable_MENU[0])
-#define MENU_HOST__svcCloseHandle \
-    ((Result(*)(Handle))pluginTable_MENU[1])
+#define MENU_HOST__svcCloseHandle ((Result(*)(Handle))pluginTable_MENU[1])
 
+// registrations stay in the sysplugins that own them, MENU only holds the list pointers
 PLUGIN_BSS(MENU) static PluginMenuLoaderTitlePatch *g_MENUFirstTitlePatch;
 PLUGIN_BSS(MENU) static PluginMenuLoaderTitlePatch *g_MENULastTitlePatch;
 PLUGIN_BSS(MENU) static PluginMenuLoaderHomePatch *g_MENUFirstHomePatch;
@@ -193,7 +198,7 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_UnregisterHomePatch(
     return false;
 }
 
-PLUGIN_CODE(MENU) void PLUGIN_MENU_PatchCodeCallHandler(
+PLUGIN_CODE(MENU) void PLUGIN_MENU_PatchCode(
     u64 progId,
     u16 progVer,
     u8 *code,
@@ -205,6 +210,7 @@ PLUGIN_CODE(MENU) void PLUGIN_MENU_PatchCodeCallHandler(
     u32 dataAddress
 )
 {
+    // every title load gets a new ID, even unpatched titles. 0 is reserved for inactive patches
     g_MENULaunchEpoch++;
     if (!g_MENULaunchEpoch)
         g_MENULaunchEpoch = 1;
@@ -223,7 +229,7 @@ PLUGIN_CODE(MENU) void PLUGIN_MENU_PatchCodeCallHandler(
     g_MENUContext.process = 0;
     g_MENUContextValid = true;
 
-    MENU_HOST__patchCode(
+    PLUGIN_MENU_PatchCodeOriginal(
         progId,
         progVer,
         code,
@@ -267,6 +273,7 @@ PLUGIN_CODE(MENU) void PLUGIN_MENU_PreCreateCodeSet(CodeSetHeader *header)
             continue;
         }
 
+        // remember which patches were accepted for this launch so later callbacks dont use old results
         active = !registration->prepare || registration->prepare(&g_MENUContext);
         registration->menuEpoch = active ? g_MENULaunchEpoch : 0;
     }

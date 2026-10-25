@@ -1,0 +1,43 @@
+--- a/sysmodules/rosalina/Makefile
++++ b/sysmodules/rosalina/Makefile
+@@ -94,6 +94,13 @@
+ export DEPSDIR	:=	$(CURDIR)/$(BUILD)
+ 
+ CFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
++HTTPSLIB_ENABLED := $(and $(wildcard $(TOPDIR)/source/httpslib.c),$(wildcard $(TOPDIR)/httpslib_tls/build.sh),$(wildcard $(TOPDIR)/../../sysplugin/finalize_transient_3on.py))
++ifeq ($(strip $(HTTPSLIB_ENABLED)),)
++CFILES := $(filter-out httpslib.c,$(CFILES))
++HTTPSLIB_OFILES :=
++else
++HTTPSLIB_OFILES := httpslib_tls_bundle.o
++endif
+ CPPFILES	:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
+ SFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
+ BINFILES	:=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.*)))
+@@ -114,7 +121,7 @@
+ 
+ export OFILES_BIN	:=	$(addsuffix .o,$(BINFILES))
+ export OFILES_SRC	:=	$(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
+-export OFILES 		:=	$(OFILES_BIN) $(OFILES_SRC)
++export OFILES 		:=	$(OFILES_BIN) $(OFILES_SRC) $(HTTPSLIB_OFILES)
+ export HFILES_BIN	:=	$(addsuffix .h,$(subst .,_,$(BINFILES)))
+ 
+ export INCLUDE	:=	$(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
+@@ -171,8 +178,17 @@
+ 	@$(NM) -CSn $@ > $(notdir $*.lst)
+ 
+ draw.o: CFLAGS += -O3
++online.o: CFLAGS += -fno-jump-tables
+ 
+ $(OFILES_SRC)	: $(HFILES_BIN) $(SEMANTIC_MARKER_PLUGIN)
++
++.PHONY: httpslib_tls_force
++
++httpslib_tls_bundle.o: httpslib_tls_force
++	@echo httpslib tls bundle
++	@CC="$(CC)" sh $(TOPDIR)/httpslib_tls/build.sh $@
++
++httpslib_tls_force:
+ 
+ #---------------------------------------------------------------------------------
+ # you need a rule like this for each extension you use as binary data

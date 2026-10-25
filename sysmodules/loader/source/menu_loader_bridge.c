@@ -9,16 +9,17 @@
 #define PLUGIN_RODATA(id) __attribute__((section(".pluginrodata_" #id), used))
 #define PLUGIN_BSS(id)    __attribute__((section(".pluginbss_" #id), used))
 
-#define MENU_BRIDGE_IPC_COMMAND        0x4D42u
+#define MENU_BRIDGE_IPC_COMMAND        0x4D42u  // MB for menu bridge
 #define MENU_BRIDGE_IPC_ABI            1u
-#define MENU_BRIDGE_STATUS_DELIVERED   0u
+#define MENU_BRIDGE_STATUS_DELIVERED   0u       // msg delivered and accepted by Rosalina
 #define MENU_BRIDGE_STATUS_RETRY       1u
 #define MENU_BRIDGE_STATUS_DROP        2u
-#define MENU_BRIDGE_QUEUE_COUNT        16u
+#define MENU_BRIDGE_QUEUE_COUNT        8u       // 8x capacity adds 1632 bytes of BSS
 #define MENU_BRIDGE_RETRY_NS           (100LL * 1000LL * 1000LL)
+#define MENU_BRIDGE_RETRY_COUNT        3u
 #define MENU_BRIDGE_PORT_FULL          ((Result)0xD0401834u)
 #define MENU_PLGLDR_RETRY_NS           (1000LL * 1000LL)
-#define MENU_PLGLDR_RETRY_COUNT        200u
+#define MENU_PLGLDR_RETRY_COUNT        200u     // retries for 200ms
 
 extern void *pluginTable_MENU[];
 #define MENU_HOST__svcCloseHandle      ((Result(*)(Handle))pluginTable_MENU[1])
@@ -40,7 +41,7 @@ typedef struct
     u32 targetPluginId;
     u32 command;
     u32 payloadSize;
-    u8 payload[SYSPLUGIN_MENU_BRIDGE_MAX_PAYLOAD];
+    u8 payload[SYSPLUGIN_MENU_BRIDGE_MAX_PAYLOAD]; // 192 bytes, IPC packet adds its own header and ABI, max size 212 bytes
 } MenuBridgeMessage;
 
 PLUGIN_BSS(MENU) static MenuBridgeMessage g_MENUBridgeQueue[MENU_BRIDGE_QUEUE_COUNT];
@@ -53,7 +54,7 @@ PLUGIN_BSS(MENU) static bool g_MENUBridgeReady;
 PLUGIN_BSS(MENU) static volatile bool g_MENUStockPlgldrBusy;
 PLUGIN_BSS(MENU) static u8 CTR_ALIGN(8) g_MENUBridgeStack[0x1000];
 
-PLUGIN_CODE(MENU) static u32 *PLUGIN_MENU_BridgeCommandBuffer(void)
+PLUGIN_CODE(MENU) static u32 *PLUGIN_MENU_BridgeCommandBuffer(void) // literally just libctru getThreadCommandBuffer() but ensures compiling within MENU section
 {
     u8 *tls;
     __asm__ volatile("mrc p15, 0, %0, c13, c0, 3" : "=r"(tls));
@@ -66,11 +67,11 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_BridgeLock(void)
 
     for (;;)
     {
-        if (__ldrex(lock) == 0)
+        if (__ldrex(lock) == 0) // exclusive ldr and str ensure only 1 thread accesses the var at a time, no possible race
         {
             if (!__strex(lock, 1))
             {
-                __dmb();
+                __dmb(); // ensure protected memory accesses happen after locking
                 return;
             }
         }
@@ -84,7 +85,7 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_BridgeLock(void)
 
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_BridgeUnlock(void)
 {
-    __dmb();
+    __dmb(); // protected updates must precede release
     g_MENUBridgeQueueLock = 0;
 }
 
@@ -164,6 +165,7 @@ PLUGIN_CODE(MENU) static u32 PLUGIN_MENU_BridgeTrySend(const MenuBridgeMessage *
 PLUGIN_CODE(MENU) static void PLUGIN_MENU_BridgeWorker(void *arg)
 {
     (void)arg;
+    u32 attempts = 0;
 
     for (;;)
     {
@@ -181,9 +183,14 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_BridgeWorker(void *arg)
         }
 
         u32 status = PLUGIN_MENU_BridgeTrySend(&g_MENUBridgeQueue[index]);
-        if (status == MENU_BRIDGE_STATUS_DELIVERED || status == MENU_BRIDGE_STATUS_DROP)
+
+        // remove accepted, dropped, or repeatedly failed messages
+        if (status == MENU_BRIDGE_STATUS_DELIVERED ||
+            status == MENU_BRIDGE_STATUS_DROP ||
+            ++attempts >= MENU_BRIDGE_RETRY_COUNT)
         {
             PLUGIN_MENU_BridgePop();
+            attempts = 0;
             continue;
         }
 
@@ -228,6 +235,7 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_BridgeSend(
     return true;
 }
 
+// gives stock Loader priority over our bridge worker when using plg:ldr
 PLUGIN_CODE(MENU) Result PLUGIN_MENU_PlgldrInitHandler(void)
 {
     Result result = MENU_BRIDGE_PORT_FULL;
@@ -250,6 +258,7 @@ PLUGIN_CODE(MENU) Result PLUGIN_MENU_PlgldrInitHandler(void)
     return result;
 }
 
+// stock Loader finished with plg:ldr, wake our bridge worker
 PLUGIN_CODE(MENU) void PLUGIN_MENU_BridgeStockClosed(void)
 {
     g_MENUStockPlgldrBusy = false;
@@ -270,6 +279,7 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_StartBridgeWorker(void)
     if (R_FAILED(result))
         return false;
 
+    // get loader thread priority and make this new one lower priority (higher number)
     if (R_SUCCEEDED(PLUGIN_MENU_svcGetThreadPriority(&priority, CUR_THREAD_HANDLE)) && priority < 0x3F)
         priority++;
 

@@ -5,8 +5,6 @@
 #define PLUGIN_CODE(id) __attribute__((section(".plugin_" #id), used))
 #define PLUGIN_BSS(id)  __attribute__((section(".pluginbss_" #id), used))
 
-#define MENU_SCRATCH_LOW  0x10000000u
-#define MENU_SCRATCH_HIGH 0x14000000u
 #define MENU_ENTRY_COLOR  RGB565(9, 34, 31)
 
 extern void *pluginTable_MENU[];
@@ -119,17 +117,6 @@ PLUGIN_CODE(MENU) void PLUGIN_MENU_UnmapPage(u32 mappedBase)
     }
 }
 
-PLUGIN_CODE(MENU) static u32 PLUGIN_MENU_StringLength(const char *text)
-{
-    const volatile char *p = text;
-    u32 length = 0;
-
-    while (p[length])
-        length++;
-
-    return length;
-}
-
 PLUGIN_CODE(MENU) __attribute__((naked, noinline)) static u32 PLUGIN_MENU_OriginalDrawString(
     u32 posX __attribute__((unused)),
     u32 posY __attribute__((unused)),
@@ -164,8 +151,13 @@ PLUGIN_CODE(MENU) static u32 PLUGIN_MENU_DrawStringHook(
 
     if (isEntry && g_MENUUnread)
     {
+        const volatile char *p = text;
+        u32 length = 0;
+        while (p[length])
+            length++;
+
         PLUGIN_MENU_OriginalDrawString(
-            posX + (PLUGIN_MENU_StringLength(text) + 1u) * SPACING_X,
+            posX + (length + 1u) * SPACING_X,
             posY,
             COLOR_RED,
             g_MENUUnreadText

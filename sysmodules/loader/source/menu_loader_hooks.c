@@ -12,15 +12,20 @@
 extern void *pluginTable_MENU[];
 #define MENU_HOST__patchCodeAddress        ((u32)pluginTable_MENU[0])
 #define MENU_HOST__svcCloseHandleAddress   ((u32)pluginTable_MENU[1])
-#define MENU_HOST__patchCodeMarker         ((u32)pluginTable_MENU[2])
 #define MENU_HOST__homeMarker              ((u32)pluginTable_MENU[3])
 #define MENU_HOST__createCodeSetMarker     ((u32)pluginTable_MENU[4])
 #define MENU_HOST__createProcessMarker     ((u32)pluginTable_MENU[5])
 #define MENU_HOST__plgldrExitMarker        ((u32)pluginTable_MENU[6])
 #define MENU_HOST__plgldrInitAddress        ((u32)pluginTable_MENU[7])
 #define MENU_HOST__plgldrInitMarker         ((u32)pluginTable_MENU[11])
+#define MENU_HOST__svcCreateCodeSetAddress  ((u32)pluginTable_MENU[12])
+#define MENU_HOST__svcCreateProcessAddress  ((u32)pluginTable_MENU[13])
 
-extern void PLUGIN_MENU_PatchCodeCallHook(void);
+extern void PLUGIN_MENU_PatchCode(
+    u64 progId, u16 progVer, u8 *code, u32 size,
+    u32 textSize, u32 roSize, u32 dataSize,
+    u32 roAddress, u32 dataAddress
+);
 extern void PLUGIN_MENU_HomeHook(void);
 extern void PLUGIN_MENU_CreateCodeSetHook(void);
 extern void PLUGIN_MENU_CreateProcessHook(void);
@@ -29,20 +34,16 @@ extern void PLUGIN_MENU_PlgldrInitCallHook(void);
 extern void PLUGIN_MENU_svcFlushEntireDataCache(void);
 extern void PLUGIN_MENU_svcInvalidateEntireInstructionCache(void);
 
-PLUGIN_DATA(MENU) u32 g_MENUPatchCodeCallReturn;
+PLUGIN_DATA(MENU) u32 g_MENUPatchCodeResume;
 PLUGIN_DATA(MENU) u32 g_MENUHomeReturn;
+PLUGIN_DATA(MENU) u32 g_MENUHomeBranchTarget;
 PLUGIN_DATA(MENU) u32 g_MENUCreateCodeSetReturn;
 PLUGIN_DATA(MENU) u32 g_MENUCreateProcessReturn;
 PLUGIN_DATA(MENU) u32 g_MENUPlgldrCloseBranchTarget;
 PLUGIN_DATA(MENU) u32 g_MENUPlgldrInitCallReturn;
 
 PLUGIN_BSS(MENU) bool g_MENUHooksReady;
-PLUGIN_BSS(MENU) static u32 g_MENUPatchCodeCallAddress;
-PLUGIN_BSS(MENU) static u32 g_MENUPatchCodeCallOriginal[2];
-PLUGIN_BSS(MENU) static u32 g_MENUAltContinuationMovAddress;
-PLUGIN_BSS(MENU) static u32 g_MENUAltContinuationBranchAddress;
-PLUGIN_BSS(MENU) static u32 g_MENUAltContinuationOriginalBranch;
-PLUGIN_BSS(MENU) static u32 g_MENUAltContinuationPatchedBranch;
+PLUGIN_BSS(MENU) static u32 g_MENUPatchCodeAddress;
 PLUGIN_BSS(MENU) static u32 g_MENUHomeAddress;
 PLUGIN_BSS(MENU) static u32 g_MENUHomeOriginal[2];
 PLUGIN_BSS(MENU) static u32 g_MENUCreateCodeSetAddress;
@@ -88,24 +89,6 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_DecodeB(
     return true;
 }
 
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_EncodeB(
-    u32 address,
-    u32 target,
-    u32 *instruction
-)
-{
-    s32 delta = (s32)(target - (address + 8u));
-
-    if (!instruction || (delta & 3) != 0 ||
-        delta < -0x02000000 || delta > 0x01FFFFFC)
-    {
-        return false;
-    }
-
-    *instruction = 0xEA000000u | (((u32)delta >> 2) & 0x00FFFFFFu);
-    return true;
-}
-
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ReplaceHookPair(
     u32 address,
     u32 expectedFirst,
@@ -148,265 +131,135 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ReplaceHookPair(
     return ok;
 }
 
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_FindPatchCodeCall(
-    u32 *outAddress,
-    u32 *outInstruction
-)
-{
-    u32 marker = MENU_HOST__patchCodeMarker;
-    u32 target = MENU_HOST__patchCodeAddress;
-    u32 first;
-    u32 last;
-    u32 foundAddress = 0;
-    u32 foundInstruction = 0;
-    u32 foundCount = 0;
-
-    if (!marker || !target)
-        return false;
-
-    first = marker >= 0x10u ? marker - 0x10u : marker;
-    last = marker + 0x50u;
-    first &= ~3u;
-
-    for (u32 address = first; address <= last; address += 4u)
-    {
-        u32 decodedTarget = 0;
-        u32 instruction = *(volatile u32 *)address;
-        if (PLUGIN_MENU_DecodeBl(instruction, address, &decodedTarget) &&
-            decodedTarget == target)
-        {
-            foundAddress = address;
-            foundInstruction = instruction;
-            foundCount++;
-        }
-    }
-
-    if (foundCount != 1u)
-        return false;
-
-    *outAddress = foundAddress;
-    *outInstruction = foundInstruction;
-    return true;
-}
-
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_FindAlternateContinuation(
-    u32 patchCallAddress,
-    u32 *movAddressOut,
-    u32 *branchAddressOut,
-    u32 *branchInstructionOut
-)
-{
-    u32 target;
-    u32 page;
-    u32 foundMov = 0;
-    u32 foundBranch = 0;
-    u32 foundInstruction = 0;
-    u32 foundCount = 0;
-
-    if (!patchCallAddress || (patchCallAddress & 3u))
-        return false;
-
-    target = patchCallAddress + 4u;
-    page = patchCallAddress & ~0xFFFu;
-
-    for (u32 address = page + 12u; address <= page + 0xFFCu; address += 4u)
-    {
-        u32 decodedTarget = 0;
-        u32 instruction = *(volatile u32 *)address;
-        u32 movAddress;
-
-        if (!PLUGIN_MENU_DecodeB(instruction, address, &decodedTarget) ||
-            decodedTarget != target)
-        {
-            continue;
-        }
-
-        movAddress = address - 12u;
-        if (*(volatile u32 *)movAddress != 0xE3A01000u ||
-            (*(volatile u32 *)(movAddress + 4u) & 0xFFFFF000u) != 0xE51F2000u ||
-            *(volatile u32 *)(movAddress + 8u) != 0xE1C200F0u)
-        {
-            continue;
-        }
-
-        foundMov = movAddress;
-        foundBranch = address;
-        foundInstruction = instruction;
-        foundCount++;
-    }
-
-    if (foundCount != 1u)
-        return false;
-
-    *movAddressOut = foundMov;
-    *branchAddressOut = foundBranch;
-    *branchInstructionOut = foundInstruction;
-    return true;
-}
-
-PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ReplaceAlternateContinuation(
-    u32 movAddress,
-    u32 branchAddress,
-    u32 expectedMov,
-    u32 expectedBranch,
-    u32 newMov,
-    u32 newBranch
-)
-{
-    u32 mapBase = 0;
-    u32 mapped = 0;
-    volatile u32 *movSite;
-    volatile u32 *branchSite;
-    bool ok;
-
-    if (!movAddress || !branchAddress || (movAddress & 3u) || (branchAddress & 3u) ||
-        (movAddress & ~0xFFFu) != (branchAddress & ~0xFFFu) ||
-        !PLUGIN_MENU_MapPage(CUR_PROCESS_HANDLE, movAddress, &mapBase, &mapped))
-    {
-        return false;
-    }
-
-    movSite = (volatile u32 *)mapped;
-    branchSite = (volatile u32 *)(mapped + branchAddress - movAddress);
-    ok = *movSite == expectedMov && *branchSite == expectedBranch;
-    if (ok)
-    {
-        *movSite = newMov;
-        *branchSite = newBranch;
-        PLUGIN_MENU_svcFlushEntireDataCache();
-        PLUGIN_MENU_svcInvalidateEntireInstructionCache();
-
-        ok = *movSite == newMov && *branchSite == newBranch;
-        if (!ok)
-        {
-            *movSite = expectedMov;
-            *branchSite = expectedBranch;
-            PLUGIN_MENU_svcFlushEntireDataCache();
-            PLUGIN_MENU_svcInvalidateEntireInstructionCache();
-        }
-    }
-
-    PLUGIN_MENU_UnmapPage(mapBase);
-    return ok;
-}
-
+// Hook the host patchCode() entry, not its call site: another Loader path
+// branches to the instruction immediately after that call. Leave it intact.
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_InstallPatchCodeHook(void)
 {
-    const u32 expectedNext = 0xE3A01201u;
-    u32 address = 0;
-    u32 originalCall = 0;
-    u32 altMovAddress = 0;
-    u32 altBranchAddress = 0;
-    u32 altOriginalBranch = 0;
-    u32 altPatchedBranch = 0;
+    const u32 expectedPush = 0xE92D4FF0u; // push {r4-r11, lr}
+    const u32 expectedMov = 0xE1A09002u;  // mov r9, r2
+    u32 address = MENU_HOST__patchCodeAddress;
 
-    if (!PLUGIN_MENU_FindPatchCodeCall(&address, &originalCall) ||
-        (address & 0xFFFu) > 0xFF8u ||
-        *(volatile u32 *)(address + 4u) != expectedNext ||
-        !PLUGIN_MENU_FindAlternateContinuation(
-            address,
-            &altMovAddress,
-            &altBranchAddress,
-            &altOriginalBranch) ||
-        !PLUGIN_MENU_EncodeB(altBranchAddress, address + 8u, &altPatchedBranch))
-    {
+    if (!address || (address & 3u) || (address & 0xFFFu) > 0xFF8u)
         return false;
-    }
 
-    if (!PLUGIN_MENU_ReplaceAlternateContinuation(
-            altMovAddress,
-            altBranchAddress,
-            0xE3A01000u,
-            altOriginalBranch,
-            expectedNext,
-            altPatchedBranch))
-    {
-        return false;
-    }
-
+    // Static assembly trampoline replays these two instructions, then resumes here.
+    g_MENUPatchCodeResume = address + 8u;
     if (!PLUGIN_MENU_ReplaceHookPair(
             address,
-            originalCall,
-            expectedNext,
+            expectedPush,
+            expectedMov,
             0xE51FF004u,
-            (u32)PLUGIN_MENU_PatchCodeCallHook))
+            (u32)PLUGIN_MENU_PatchCode))
     {
-        (void)PLUGIN_MENU_ReplaceAlternateContinuation(
-            altMovAddress,
-            altBranchAddress,
-            expectedNext,
-            altPatchedBranch,
-            0xE3A01000u,
-            altOriginalBranch
-        );
+        g_MENUPatchCodeResume = 0;
         return false;
     }
 
-    g_MENUPatchCodeCallAddress = address;
-    g_MENUPatchCodeCallOriginal[0] = originalCall;
-    g_MENUPatchCodeCallOriginal[1] = expectedNext;
-    g_MENUPatchCodeCallReturn = address + 8u;
-    g_MENUAltContinuationMovAddress = altMovAddress;
-    g_MENUAltContinuationBranchAddress = altBranchAddress;
-    g_MENUAltContinuationOriginalBranch = altOriginalBranch;
-    g_MENUAltContinuationPatchedBranch = altPatchedBranch;
+    g_MENUPatchCodeAddress = address;
     return true;
 }
 
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_RestorePatchCodeHook(void)
 {
-    bool pairOk = true;
-    bool altOk = true;
-
-    if (g_MENUPatchCodeCallAddress)
-    {
-        pairOk = PLUGIN_MENU_ReplaceHookPair(
-            g_MENUPatchCodeCallAddress,
-            0xE51FF004u,
-            (u32)PLUGIN_MENU_PatchCodeCallHook,
-            g_MENUPatchCodeCallOriginal[0],
-            g_MENUPatchCodeCallOriginal[1]
-        );
-    }
-
-    if (g_MENUAltContinuationMovAddress && g_MENUAltContinuationBranchAddress)
-    {
-        altOk = PLUGIN_MENU_ReplaceAlternateContinuation(
-            g_MENUAltContinuationMovAddress,
-            g_MENUAltContinuationBranchAddress,
-            0xE3A01201u,
-            g_MENUAltContinuationPatchedBranch,
-            0xE3A01000u,
-            g_MENUAltContinuationOriginalBranch
-        );
-    }
-
-    if (pairOk && altOk)
-    {
-        g_MENUPatchCodeCallAddress = 0;
-        g_MENUAltContinuationMovAddress = 0;
-        g_MENUAltContinuationBranchAddress = 0;
+    if (!g_MENUPatchCodeAddress)
         return true;
+
+    if (!PLUGIN_MENU_ReplaceHookPair(
+            g_MENUPatchCodeAddress,
+            0xE51FF004u,
+            (u32)PLUGIN_MENU_PatchCode,
+            0xE92D4FF0u,
+            0xE1A09002u))
+    {
+        return false;
     }
-    return false;
+
+    g_MENUPatchCodeAddress = 0;
+    g_MENUPatchCodeResume = 0;
+    return true;
+}
+
+PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ReadR2Literal(
+    u32 instruction,
+    u32 address,
+    u32 *value
+)
+{
+    u32 literal;
+
+    if ((instruction & 0xFFFFF000u) != 0xE59F2000u)
+        return false;
+
+    literal = address + 8u + (instruction & 0xFFFu);
+    if (literal < address || (literal & 3u))
+        return false;
+
+    *value = *(volatile u32 *)literal;
+    return true;
+}
+
+// The semantic HOME marker anchors the whitelist writes. Match the complete
+// stock guard around the second write; do not guess an interior continuation.
+PLUGIN_CODE(MENU) static volatile u32 *PLUGIN_MENU_FindHomePatch(
+    volatile u32 *anchor,
+    u32 maxWords,
+    u32 *branchTarget
+)
+{
+    volatile u32 *found = NULL;
+
+    for (u32 i = 7; i + 3u < maxWords; i++)
+    {
+        volatile u32 *p = anchor + i;
+        u32 firstValue, secondValue, configAddress;
+
+        if (p[-6] != 0xE7872003u || p[-4] != 0xE0873003u ||
+            p[-3] != 0xE5922000u || p[-2] != 0xE3120004u ||
+            p[0] != 0xE5832004u || (p[1] & 0xFF000000u) != 0x0A000000u ||
+            p[2] != 0xE3A09001u || p[3] != 0xE3A08000u ||
+            !PLUGIN_MENU_ReadR2Literal(p[-7], (u32)(p - 7), &firstValue) ||
+            firstValue != 0xE3A00000u ||
+            !PLUGIN_MENU_ReadR2Literal(p[-5], (u32)(p - 5), &configAddress) ||
+            !configAddress ||
+            !PLUGIN_MENU_ReadR2Literal(p[-1], (u32)(p - 1), &secondValue) ||
+            secondValue != 0xE12FFF1Eu)
+        {
+            continue;
+        }
+
+        if (found)
+            return NULL;
+
+        // BEQ has the same signed imm24 encoding as B; its condition is checked above.
+        s32 offset = (s32)(p[1] << 8) >> 6;
+        *branchTarget = (u32)(p + 1) + 8u + (u32)offset;
+        found = p;
+    }
+    return found;
 }
 
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_InstallHomeHook(void)
 {
-    u32 address = MENU_HOST__homeMarker;
+    u32 marker = MENU_HOST__homeMarker;
+    u32 address, words, branchTarget;
     volatile u32 *site;
 
-    if (!address || (address & 3u) || (address & 0xFFFu) > 0xFD4u)
+    if (!marker || (marker & 3u))
         return false;
 
-    site = (volatile u32 *)address;
-    if ((site[0] & 0xFFFFF000u) != 0xE59F2000u || site[1] != 0xE7872003u)
+    words = (0x1000u - (marker & 0xFFFu)) / 4u;
+    if (words > 0x40u)
+        words = 0x40u;
+    site = PLUGIN_MENU_FindHomePatch((volatile u32 *)marker, words, &branchTarget);
+    if (!site)
         return false;
 
+    address = (u32)site;
     g_MENUHomeAddress = address;
     g_MENUHomeOriginal[0] = site[0];
     g_MENUHomeOriginal[1] = site[1];
-    g_MENUHomeReturn = address + 0x2Cu;
+    g_MENUHomeReturn = address + 8u;
+    g_MENUHomeBranchTarget = branchTarget;
 
     if (!PLUGIN_MENU_ReplaceHookPair(
             address,
@@ -417,6 +270,7 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_InstallHomeHook(void)
     {
         g_MENUHomeAddress = 0;
         g_MENUHomeReturn = 0;
+        g_MENUHomeBranchTarget = 0;
         return false;
     }
     return true;
@@ -439,6 +293,7 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_RestoreHomeHook(void)
 
     g_MENUHomeAddress = 0;
     g_MENUHomeReturn = 0;
+    g_MENUHomeBranchTarget = 0;
     return true;
 }
 
@@ -452,7 +307,9 @@ PLUGIN_CODE(MENU) static volatile u32 *PLUGIN_MENU_FindCreateCodeSetPatch(
     for (u32 i = 0; i + 2u < maxWords; i++)
     {
         volatile u32 *p = anchor + i;
-        if ((p[0] & 0xFF000000u) == 0xEB000000u &&
+        u32 target;
+        if (PLUGIN_MENU_DecodeBl(p[0], (u32)p, &target) &&
+            target == MENU_HOST__svcCreateCodeSetAddress &&
             p[1] == 0xE3500000u &&
             (p[2] & 0xFF000000u) == 0xAA000000u)
         {
@@ -474,7 +331,9 @@ PLUGIN_CODE(MENU) static volatile u32 *PLUGIN_MENU_FindCreateProcessPatch(
     for (u32 i = 0; i + 3u < maxWords; i++)
     {
         volatile u32 *p = anchor + i;
-        if ((p[0] & 0xFF000000u) == 0xEB000000u &&
+        u32 target;
+        if (PLUGIN_MENU_DecodeBl(p[0], (u32)p, &target) &&
+            target == MENU_HOST__svcCreateProcessAddress &&
             p[1] == 0xE1A05000u &&
             (p[2] & 0xFFFFF000u) == 0xE59D0000u &&
             (p[3] & 0xFF000000u) == 0xEB000000u)
