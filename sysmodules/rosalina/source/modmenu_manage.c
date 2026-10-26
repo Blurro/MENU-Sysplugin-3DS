@@ -1337,6 +1337,17 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_Manage(void)
                             if (header.magic == MENU_PLUGIN_MAGIC && header.pluginId == MENU_PLUGIN_ID)
                                 g_MENUManageActionInfo->selectedMenuCount++;
                         }
+                        offset = nextOffset;
+                    }
+
+                    // check the whole stack, even when it is disabled
+                    for (u32 offset = 0;;)
+                    {
+                        PluginMenu3nxHeader header;
+                        u32 metadataOffset;
+                        u32 nextOffset;
+                        if (!PLUGIN_MENU_ReadHeader(file, offset, &header, &metadataOffset, &nextOffset) || (header.magic != MENU_PLUGIN_MAGIC && header.magic != LOADER_PLUGIN_MAGIC))
+                            break;
                         bool repairProvidersResult;
                         {
                             Handle repairProvidersFile = file;
@@ -1384,6 +1395,12 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_Manage(void)
                                 }
                                 recordsBytes = group.count * sizeof(PluginMenuManageRepairRecord);
                                 bool addMissingCondition = (group.count && group.providerId && !PLUGIN_MENU_ManageFindWinner(header.magic, group.providerId)) != 0;
+                                for (u32 i = 0; addMissingCondition && i < g_MENUManageActionInfo->componentCount; i++)
+                                {
+                                    if (g_MENUManageActionInfo->componentIds[i] == group.providerId &&
+                                        g_MENUManageActionInfo->componentModules[i] == ((header.magic == LOADER_PLUGIN_MAGIC) ? ('L') : ('R')))
+                                        addMissingCondition = false;
+                                }
                                 if (addMissingCondition)
                                 {
                                     bool addMissingResult;
