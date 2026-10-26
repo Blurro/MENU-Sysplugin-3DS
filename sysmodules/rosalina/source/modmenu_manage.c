@@ -1234,7 +1234,7 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_Manage(void)
                 }
 
                 if ((first + MENU_MANAGE_VISIBLE_ROWS) < total)
-                    MENU_HOST__Draw_DrawString(24, MENU_ITEM_TOP_Y + MENU_MANAGE_VISIBLE_ROWS * MENU_ITEM_SPACING_Y, COLOR_GRAY, g_MENUDots);
+                    MENU_HOST__Draw_DrawString(24, MENU_ITEM_TOP_Y + MENU_MANAGE_VISIBLE_ROWS * MENU_ITEM_SPACING_Y + MENU_MANAGE_SECTION_ITEM_Y_OFFSET, COLOR_GRAY, g_MENUDots);
                 if (!g_MENUManageFileCount)
                 {
                     MENU_HOST__Draw_DrawString(35, 67, COLOR_GRAY, g_MENUManageEmptyText);
@@ -1528,7 +1528,11 @@ PLUGIN_CODE(MENU) static void PLUGIN_MENU_Manage(void)
                             }
                             (void) drawContainsResult;
                             {
-                                bool menuDanger = g_MENUManageActionInfo->selectedComponentCount == 1u && g_MENUManageActionInfo->selectedMenuCount == 1u;
+                                PluginMenuManageWinner *menuLoader = PLUGIN_MENU_ManageFindWinner(LOADER_PLUGIN_MAGIC, MENU_PLUGIN_ID);
+                                PluginMenuManageWinner *menuRosalina = PLUGIN_MENU_ManageFindWinner(MENU_PLUGIN_MAGIC, MENU_PLUGIN_ID);
+                                bool menuDanger = menuLoader && menuRosalina &&
+                                    menuLoader->nameOffset == actionsPageItem->nameOffset &&
+                                    menuRosalina->nameOffset == actionsPageItem->nameOffset;
                                 u32 messageLines = g_MENUManageActionInfo->missingCount + ((menuDanger) ? (3u) : (0u));
                                 if (!messageLines)
                                     goto drawWarningsDone;

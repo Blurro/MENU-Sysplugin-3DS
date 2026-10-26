@@ -35,7 +35,7 @@ if hashlib.sha256(makefile.read_bytes()).hexdigest() != prepared:
 PY_BUILD
 
 # HTTPSLIB transient version. Change this one value when bumping httpslib.
-HTTPSLIB_VERSION=110
+HTTPSLIB_VERSION=111
 
 MAIN_BUILDER="${SCRIPT_DIR}/makeplugin.sh"
 FINALIZE_TOOL="${SCRIPT_DIR}/sysplugin/finalize_transient_3on.py"

@@ -37,7 +37,7 @@ Make sure **Load external FIRMs and modules** is enabled in the SELECT boot sett
 * Downloadable `.3on` pages for extending the Online Menu
 * Loader-side title/HOME patch dispatcher for other Sysplugins
 * One-way Loader -> Rosalina MENU bridge over `plg:ldr`
-* Online Menu API compatibility gate that updates MENU before using management callbacks when the required API is unavailable
+* Online Menu API checks before using management callbacks
 
 ---
 
@@ -232,7 +232,7 @@ bool enableSysplugin(const char *name);
 bool deleteSysplugin(const char *name);
 ```
 
-`version` is currently 6. The four sysplugin management callbacks require version 6 and must be checked before use. With API version 5, the current Online page offers the MENU update first.
+`version` is currently 6. The four sysplugin management callbacks require version 6 and must be checked before use. The current Online page requires API version 6; older clients use the separately built compatibility updater.
 
 `sourceUrlPrefix` is the directory URL the current `.3on` came from, so assets can sit beside it without hardcoding the complete web path.
 

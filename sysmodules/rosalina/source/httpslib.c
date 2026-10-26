@@ -1279,9 +1279,7 @@ PLUGIN_CODE(htps) static Result PLUGIN_htps_OnlineDownloadToMemory(
 // online files
 
 PLUGIN_RODATA(htps) static const char g_htpsFetchPath[] = "/luma/plugins/sysplgfetch.txt";
-PLUGIN_RODATA(htps) static const char g_htpsOnlinePath[] = "/luma/plugins/onlinepagetemp.3on";
-PLUGIN_RODATA(htps) static const char g_htpsOldOnlineName[] = "onlinetemporary.3on";
-PLUGIN_RODATA(htps) static const char g_htpsOnlineName[] = "onlinepagetemp.3on";
+PLUGIN_RODATA(htps) static const char g_htpsOnlinePath[] = "/luma/plugins/.online-page.tmp";
 
 // source chooser
 
@@ -1292,9 +1290,10 @@ PLUGIN_RODATA(htps) static const char g_htpsNoSources[] = "No sources configured
 PLUGIN_RODATA(htps) static const char g_htpsNoSourcesIntro[] = "Add sources to";
 PLUGIN_RODATA(htps) static const char g_htpsNoSourcesPath[] = "SD:/luma/plugins/sysplgfetch.txt";
 PLUGIN_RODATA(htps) static const char g_htpsNoSourcesBody[] = "to download Sysplugins from!";
-PLUGIN_RODATA(htps) static const char g_htpsNoSourcesDiscord[] =
-    "Visit the Nexus3DS Discord server\n"
-    "to find these.";
+PLUGIN_RODATA(htps) static const char g_htpsNoSourcesDiscord[] = "Visit the Nexus3DS Discord server!";
+PLUGIN_RODATA(htps) static const char g_htpsAddBlurroSource[] = "Press X to add Blurro's source!";
+PLUGIN_RODATA(htps) static const char g_htpsBlurroTitle[] = "Blurro's Sysplugins";
+PLUGIN_RODATA(htps) static const char g_htpsBlurroUrl[] = "https://blurro.github.io/sysplugins/online_v1/onlinepagetemp.3on";
 
 // online status
 
@@ -1358,32 +1357,28 @@ PLUGIN_CODE(htps) static char *PLUGIN_htps_NextFetchLine(char **cursor)
 
 PLUGIN_CODE(htps) static bool PLUGIN_htps_SetSourceUrl(const char *url)
 {
-    u32 n=0,lastSlash=0xFFFFFFFFu;
-    if(!url)return false;
-    while(url[n])
+    u32 length = 0;
+    u32 lastSlash = 0xFFFFFFFFu;
+    if (!url)
+        return false;
+
+    while (url[length])
     {
-        if(n+1u>=sizeof(g_htpsOnlineUrl))return false;
-        g_htpsOnlineUrl[n]=url[n];
-        if(url[n]=='/')lastSlash=n;
-        n++;
+        if (length + 1u >= sizeof(g_htpsOnlineUrl))
+            return false;
+        g_htpsOnlineUrl[length] = url[length];
+        if (url[length] == '/')
+            lastSlash = length;
+        length++;
     }
-    if(!n||lastSlash==0xFFFFFFFFu||lastSlash+1u>=n||lastSlash+2u>sizeof(g_htpsFetchBase))return false;
-    // old source entries request the new file
-    u32 nameStart=lastSlash+1u;
-    if(n-nameStart==sizeof(g_htpsOldOnlineName)-1u)
-    {
-        bool oldName=true;
-        for(u32 i=0;i<sizeof(g_htpsOldOnlineName)-1u;i++)
-            if(g_htpsOnlineUrl[nameStart+i]!=g_htpsOldOnlineName[i]){oldName=false;break;}
-        if(oldName)
-        {
-            for(u32 i=0;i<sizeof(g_htpsOnlineName)-1u;i++)g_htpsOnlineUrl[nameStart+i]=g_htpsOnlineName[i];
-            n=nameStart+sizeof(g_htpsOnlineName)-1u;
-        }
-    }
-    g_htpsOnlineUrl[n]=0;
-    for(u32 i=0;i<=lastSlash;i++)((volatile char *)g_htpsFetchBase)[i]=((volatile const char *)g_htpsOnlineUrl)[i];
-    ((volatile char *)g_htpsFetchBase)[lastSlash+1u]=0;
+    if (!length || lastSlash == 0xFFFFFFFFu || lastSlash + 1u >= length ||
+        lastSlash + 2u > sizeof(g_htpsFetchBase))
+        return false;
+
+    g_htpsOnlineUrl[length] = 0;
+    for (u32 i = 0; i <= lastSlash; i++)
+        ((volatile char *)g_htpsFetchBase)[i] = ((volatile const char *)g_htpsOnlineUrl)[i];
+    g_htpsFetchBase[lastSlash + 1u] = 0;
     return true;
 }
 
@@ -1905,12 +1900,48 @@ PLUGIN_CODE(htps) static void PLUGIN_htps_OpenOnlineSource(const char *url)
 #include "httpslib_sources.c"
 #undef HTTPSLIB_SOURCE
 
+PLUGIN_CODE(htps) static bool PLUGIN_htps_ShowNoSources(void)
+{
+    HTTPS_HOST__Draw_Lock();
+    HTTPS_HOST__Draw_Clear();
+    PLUGIN_htps_DrawChooserFrame();
+    HTTPS_HOST__Draw_String(35, 45, 0x7BEFu, g_htpsNoSources);
+    HTTPS_HOST__Draw_String(35, 67, 0x7BEFu, g_htpsNoSourcesIntro);
+    HTTPS_HOST__Draw_String(35, 78, 0x861Fu, g_htpsNoSourcesPath);
+    HTTPS_HOST__Draw_String(35, 89, 0x7BEFu, g_htpsNoSourcesBody);
+    HTTPS_HOST__Draw_String(35, 111, 0x7BEFu, g_htpsNoSourcesDiscord);
+    HTTPS_HOST__Draw_String(35, 144, 0xA7F5u, g_htpsAddBlurroSource);
+    HTTPS_HOST__Draw_Flush();
+    HTTPS_HOST__Draw_Unlock();
+    while (!(*HTTPS_HOST__menuShouldExit))
+    {
+        u32 pressed = HTTPS_HOST__waitInputWithTimeout(-1);
+        if (pressed & KEY_B)
+            return false;
+        if (pressed & KEY_X)
+        {
+            if (!g_httpsHost->addOnlineEntry(g_htpsBlurroTitle, g_htpsBlurroUrl))
+            {
+                PLUGIN_htps_DrawFetchError();
+                return false;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
 PLUGIN_CODE(htps) static void PLUGIN_htps_OpenOnlineMenu(void)
 {
     u32 count = 0;
     u32 selected = 0;
     u32 first = 0;
     bool redraw = true;
+reloadSources:
+    count = 0;
+    selected = 0;
+    first = 0;
+    redraw = true;
     bool fetchSourcesResult2;
     {
         u32 *fetchSourcesCountOut2 = &count;
@@ -1985,21 +2016,8 @@ PLUGIN_CODE(htps) static void PLUGIN_htps_OpenOnlineMenu(void)
     }
     if (!count)
     {
-        HTTPS_HOST__Draw_Lock();
-        HTTPS_HOST__Draw_Clear();
-        PLUGIN_htps_DrawChooserFrame();
-        HTTPS_HOST__Draw_String(35, 45, 0x7BEFu, g_htpsNoSources);
-        HTTPS_HOST__Draw_String(35, 67, 0x7BEFu, g_htpsNoSourcesIntro);
-        // Light blue (128, 192, 255).
-        HTTPS_HOST__Draw_String(35, 78, 0x861Fu, g_htpsNoSourcesPath);
-        HTTPS_HOST__Draw_String(35, 89, 0x7BEFu, g_htpsNoSourcesBody);
-        HTTPS_HOST__Draw_String(35, 111, 0x7BEFu, g_htpsNoSourcesDiscord);
-        HTTPS_HOST__Draw_Flush();
-        HTTPS_HOST__Draw_Unlock();
-        while (!(*HTTPS_HOST__menuShouldExit))
-            if (HTTPS_HOST__waitInputWithTimeout(-1) & KEY_B)
-            break;
-
+        if (PLUGIN_htps_ShowNoSources())
+            goto reloadSources;
         return;
     }
     while (!(*HTTPS_HOST__menuShouldExit))

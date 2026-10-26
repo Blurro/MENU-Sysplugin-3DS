@@ -9,7 +9,7 @@
 #define PLUGIN_BSS(id)    __attribute__((section(".pluginbss_" #id), used))
 
 #define MENU_ONLINE_API_VERSION 6u
-#define MENU_ONLINE_API_MIN_VERSION 5u
+#define MENU_ONLINE_API_MIN_VERSION 6u
 #define MENU_ONLINE_BORDER_COLOR RGB8_to_565(65, 105, 225)
 #define MENU_ONLINE_TITLE_COLOR COLOR_CYAN
 #define MENU_ONLINE_DIR_NAME_CAP 256u
@@ -73,16 +73,7 @@ PLUGIN_RODATA(onln) static const char g_onlinePipe[] = "|";
 
 // MENU update prompt
 
-PLUGIN_RODATA(onln) static const char g_bigUpdateTitle[] = "Big update needed!";
-PLUGIN_RODATA(onln) static const char g_bigUpdateLine1[] = "The MENU plugin has been updated with new API";
-PLUGIN_RODATA(onln) static const char g_bigUpdateLine2[] = "functions and Online Menu compatibility.";
-PLUGIN_RODATA(onln) static const char g_bigUpdateLine3[] = "Some plugins will need you to update them";
-PLUGIN_RODATA(onln) static const char g_bigUpdateLine4[] = "afterwards, and will not load until you do so.";
-PLUGIN_RODATA(onln) static const char g_bigUpdateQuestion[] = "Update MENU plugin?";
-PLUGIN_RODATA(onln) static const char g_bigUpdateAccept[] = "A: Update";
-PLUGIN_RODATA(onln) static const char g_bigUpdateLeave[] = "B: Leave";
-PLUGIN_RODATA(onln) static const char g_bigUpdateUpdating[] = "Updating MENU plugin...";
-PLUGIN_RODATA(onln) static const char g_bigUpdateFailed[] = "MENU update failed";
+PLUGIN_RODATA(onln) static const char g_packUpdatePrompt[] = "A: Update";
 
 // updater files and messages
 
@@ -3946,148 +3937,10 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_BuildPack(
     return result;
 }
 
-PLUGIN_CODE(onln) static void PLUGIN_onln_DrawBigUpdateFrame(const MENUOnlineApi *api)
-{
-    api->drawString(10, 8, MENU_ONLINE_BORDER_COLOR, g_onlinePlus);
-    api->drawString(16, 8, MENU_ONLINE_BORDER_COLOR, g_updateWideRail);
-    api->drawString(196, 8, MENU_ONLINE_BORDER_COLOR, g_onlinePlus);
-    api->drawString(10, 16, MENU_ONLINE_BORDER_COLOR, g_onlinePipe);
-    api->drawString(196, 16, MENU_ONLINE_BORDER_COLOR, g_onlinePipe);
-    api->drawString(10, 24, MENU_ONLINE_BORDER_COLOR, g_onlinePlus);
-    api->drawString(16, 24, MENU_ONLINE_BORDER_COLOR, g_updateWideRail);
-    api->drawString(196, 24, MENU_ONLINE_BORDER_COLOR, g_onlinePlus);
-    api->drawString(22, 16, MENU_ONLINE_TITLE_COLOR, g_bigUpdateTitle);
-}
-
-PLUGIN_CODE(onln) static void PLUGIN_onln_DrawBigUpdateStatus(
-    const MENUOnlineApi *api, const char *message, Result result)
-{
-    api->drawLock();
-    api->drawClear();
-    PLUGIN_onln_DrawBigUpdateFrame(api);
-    api->drawString(20, 52, R_FAILED(result) ? COLOR_RED : COLOR_WHITE, message);
-    if (R_FAILED(result))
-    {
-        PLUGIN_onln_FormatResult(result);
-        api->drawString(20, 78, COLOR_RED, g_onlineResultPrefix);
-        api->drawString(80, 78, COLOR_RED, g_onlineResultHex);
-        api->drawString(20, 112, COLOR_GRAY, g_updatePressBack);
-    }
-    api->drawFlush();
-    api->drawUnlock();
-}
-
 PLUGIN_MAIN(onln) void PLUGIN_onln_Main(const MENUOnlineApi *api)
 {
-    if (!api || api->version < MENU_ONLINE_API_MIN_VERSION || !api->drawLock || !api->drawUnlock || !api->drawClear || !api->drawString || !api->drawFlush || !api->waitInputWithTimeout || !api->menuShouldExit || !api->downloadToFile || !api->downloadToMemory || !api->getFileSize || !api->readFile || !api->writeFile || !api->setFileSize || !api->deleteFile || !api->renameFile || !api->fileExists || !api->enumerateDirectory || !api->sourceUrlPrefix || !(*api->sourceUrlPrefix))
+    if (!api || api->version < MENU_ONLINE_API_MIN_VERSION || !api->drawLock || !api->drawUnlock || !api->drawClear || !api->drawString || !api->drawFlush || !api->waitInputWithTimeout || !api->menuShouldExit || !api->downloadToFile || !api->downloadToMemory || !api->getFileSize || !api->readFile || !api->writeFile || !api->setFileSize || !api->deleteFile || !api->renameFile || !api->fileExists || !api->enumerateDirectory || !api->sourceUrlPrefix || !(*api->sourceUrlPrefix) || !api->addSysplugin || !api->disableSysplugin || !api->enableSysplugin || !api->deleteSysplugin)
     {
-        return;
-    }
-    bool manageApiResult;
-    {
-        manageApiResult = api && api->version >= MENU_ONLINE_API_VERSION && api->addSysplugin && api->disableSysplugin && api->enableSysplugin && api->deleteSysplugin;
-    }
-    if (!manageApiResult)
-    {
-        api->drawLock();
-        api->drawClear();
-        PLUGIN_onln_DrawBigUpdateFrame(api);
-        api->drawString(20, 44, COLOR_WHITE, g_bigUpdateLine1);
-        api->drawString(20, 57, COLOR_WHITE, g_bigUpdateLine2);
-        api->drawString(20, 82, COLOR_WHITE, g_bigUpdateLine3);
-        api->drawString(20, 95, COLOR_WHITE, g_bigUpdateLine4);
-        api->drawString(20, 128, COLOR_YELLOW, g_bigUpdateQuestion);
-        api->drawString(20, 154, COLOR_GREEN, g_bigUpdateAccept);
-        api->drawString(20, 172, COLOR_GRAY, g_bigUpdateLeave);
-        api->drawFlush();
-        api->drawUnlock();
-        for (;;)
-        {
-            u32 pressed;
-            if (*api->menuShouldExit)
-                return;
-            pressed = api->waitInputWithTimeout(50);
-            if (pressed & KEY_B)
-                return;
-            if (pressed & KEY_A)
-            {
-                Result menuUpdateResult;
-                {
-                    Result result;
-                    OnlnPack *menuPack;
-                    PLUGIN_onln_DrawBigUpdateStatus(api, g_updateRecovering, 0);
-                    result = PLUGIN_onln_RecoverInterruptedUpdate(api);
-                    if (R_FAILED(result))
-                    {
-                        menuUpdateResult = result;
-                        goto menuUpdateDone;
-                    }
-                    PLUGIN_onln_DrawBigUpdateStatus(api, g_updateFetching, 0);
-                    PLUGIN_onln_DeleteIfExists(api, g_updateManifestPath);
-                    if (!PLUGIN_onln_BuildSourceUrl(api, g_updateManifestName, g_updateUrl, sizeof(g_updateUrl)))
-                        result = ONLN_UPDATE_BAD_FORMAT;
-                    else
-                        result = api->downloadToFile(g_updateUrl, g_updateManifestPath, ONLN_PACK_MANIFEST_MAX);
-                    if (R_FAILED(result))
-                        goto menuUpdateFinish;
-                    result = PLUGIN_onln_ParseManifest(api);
-                    if (R_FAILED(result))
-                        goto menuUpdateFinish;
-                    result = PLUGIN_onln_ParsePackManifest(api);
-                    if (R_FAILED(result))
-                        goto menuUpdateFinish;
-                    OnlnPack *menuPackResult;
-                    {
-                        for (u32 i = 0; i < g_packCount; i++)
-                        {
-                            OnlnPack *pack = &g_packs[i];
-                            for (u32 j = 0; j < pack->componentCount; j++)
-                                if (pack->components[j].plgid == ONLN_MENU_PLUGIN_ID)
-                            {
-                                menuPackResult = pack;
-                                goto menuPackDone;
-                            }
-
-                        }
-
-                        menuPackResult = NULL;
-                        menuPackDone:;
-
-                    }
-                    menuPack = menuPackResult;
-                    if (!menuPack)
-                    {
-                        result = ONLN_PACK_BAD_FORMAT;
-                        goto menuUpdateFinish;
-                    }
-                    PLUGIN_onln_DrawBigUpdateStatus(api, g_bigUpdateUpdating, 0);
-                    result = PLUGIN_onln_BuildPack(api, menuPack, NULL);
-                    menuUpdateFinish:
-                    PLUGIN_onln_DeleteIfExists(api, g_updateManifestPath);
-
-                    menuUpdateResult = result;
-                    menuUpdateDone:;
-
-                }
-                Result result = menuUpdateResult;
-                if (R_FAILED(result))
-                {
-                    PLUGIN_onln_DrawBigUpdateStatus(api, g_bigUpdateFailed, result);
-                    PLUGIN_onln_WaitBack(api);
-                    return;
-                }
-                api->drawLock();
-                api->drawClear();
-                PLUGIN_onln_DrawBigUpdateFrame(api);
-                api->drawString(20, 58, COLOR_YELLOW, g_updateRestart);
-                api->drawString(20, 92, COLOR_GRAY, g_updatePressBack);
-                api->drawFlush();
-                api->drawUnlock();
-                PLUGIN_onln_WaitBack(api);
-                return;
-            }
-        }
-
         return;
     }
     {
@@ -4409,7 +4262,7 @@ PLUGIN_MAIN(onln) void PLUGIN_onln_Main(const MENUOnlineApi *api)
                                     if ((first + shown) < packDetailsPack->componentCount)
                                         api->drawString(280, 198, COLOR_GRAY, g_updateDots);
                                     if (state == ONLN_PACK_STATE_GREEN)
-                                        api->drawString(24, 209, ONLN_UPDATE_NEWER_COLOR, g_bigUpdateAccept);
+                                        api->drawString(24, 209, ONLN_UPDATE_NEWER_COLOR, g_packUpdatePrompt);
                                     else if (state == ONLN_PACK_STATE_BLUE)
                                         api->drawString(24, 209, ONLN_PACK_MISSING_COLOR, g_packInstall);
                                     else
