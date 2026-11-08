@@ -16,14 +16,23 @@
 .extern PLUGIN_MENU_PlgldrInitHandler
 
 .balign 4
-@ original host patchCode() body, skipping only two overwritten prologue instructions
-.global PLUGIN_MENU_PatchCodeOriginal
-.type   PLUGIN_MENU_PatchCodeOriginal, %function
-PLUGIN_MENU_PatchCodeOriginal:
-    push    {r4-r11, lr}       @ host prologue instruction 1
-    mov     r9, r2             @ host prologue instruction 2
+@ both trampolines jump into the matching original body
+.global PLUGIN_MENU_PatchCodeOriginalNew
+.type   PLUGIN_MENU_PatchCodeOriginalNew, %function
+PLUGIN_MENU_PatchCodeOriginalNew:
+    push    {r4-r11, lr}
+    sub     sp, sp, #0xd4
     ldr     r12, =g_MENUPatchCodeResume
-    ldr     pc, [r12]          @ resume host patchCode() at entry+8
+    ldr     pc, [r12]
+
+.balign 4
+.global PLUGIN_MENU_PatchCodeOriginalOld
+.type   PLUGIN_MENU_PatchCodeOriginalOld, %function
+PLUGIN_MENU_PatchCodeOriginalOld:
+    push    {r4-r11, lr}
+    mov     r9, r2
+    ldr     r12, =g_MENUPatchCodeResume
+    ldr     pc, [r12]
 
 .balign 4
 @ hook: verified second HOME whitelist store and its following BEQ

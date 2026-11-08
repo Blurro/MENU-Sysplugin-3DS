@@ -22,9 +22,13 @@ extern void *pluginTable_MENU[];
 #define MENU_HOST__svcCreateProcessAddress  ((u32)pluginTable_MENU[13])
 
 extern void PLUGIN_MENU_PatchCode(
-    u64 progId, u16 progVer, u8 *code, u32 size,
+    u8 *code, u32 size, u32 codeSize, u64 progId, u16 progVer,
     u32 textSize, u32 roSize, u32 dataSize,
     u32 roAddress, u32 dataAddress
+);
+extern void PLUGIN_MENU_PatchCodeOld(
+    u64 progId, u16 progVer, u8 *code, u32 size,
+    u32 textSize, u32 roSize, u32 dataSize, u32 roAddress, u32 dataAddress
 );
 extern void PLUGIN_MENU_HomeHook(void);
 extern void PLUGIN_MENU_CreateCodeSetHook(void);
@@ -35,6 +39,7 @@ extern void PLUGIN_MENU_svcFlushEntireDataCache(void);
 extern void PLUGIN_MENU_svcInvalidateEntireInstructionCache(void);
 
 PLUGIN_DATA(MENU) u32 g_MENUPatchCodeResume;
+PLUGIN_DATA(MENU) u32 g_MENUPatchCodeOriginalSecond;
 PLUGIN_DATA(MENU) u32 g_MENUHomeReturn;
 PLUGIN_DATA(MENU) u32 g_MENUHomeBranchTarget;
 PLUGIN_DATA(MENU) u32 g_MENUCreateCodeSetReturn;
@@ -135,23 +140,30 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_ReplaceHookPair(
 // branches to the instruction immediately after that call. Leave it intact.
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_InstallPatchCodeHook(void)
 {
-    const u32 expectedPush = 0xE92D4FF0u; // push {r4-r11, lr}
-    const u32 expectedMov = 0xE1A09002u;  // mov r9, r2
+    const u32 expectedPush = 0xE92D4FF0u;
     u32 address = MENU_HOST__patchCodeAddress;
+    u32 second, hook;
 
     if (!address || (address & 3u) || (address & 0xFFFu) > 0xFF8u)
         return false;
 
-    // Static assembly trampoline replays these two instructions, then resumes here.
+    if (*(volatile u32 *)address != expectedPush)
+        return false;
+    second = *(volatile u32 *)(address + 4u);
+    if (second == 0xE1A09002u) // 0.4.1 mov r9, r2
+        hook = (u32)PLUGIN_MENU_PatchCodeOld;
+    else if (second == 0xE24DD0D4u) // 0.5.0 stack frame
+        hook = (u32)PLUGIN_MENU_PatchCode;
+    else
+        return false;
+
+    g_MENUPatchCodeOriginalSecond = second;
     g_MENUPatchCodeResume = address + 8u;
     if (!PLUGIN_MENU_ReplaceHookPair(
-            address,
-            expectedPush,
-            expectedMov,
-            0xE51FF004u,
-            (u32)PLUGIN_MENU_PatchCode))
+            address, expectedPush, second, 0xE51FF004u, hook))
     {
         g_MENUPatchCodeResume = 0;
+        g_MENUPatchCodeOriginalSecond = 0;
         return false;
     }
 
@@ -161,21 +173,22 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_InstallPatchCodeHook(void)
 
 PLUGIN_CODE(MENU) static bool PLUGIN_MENU_RestorePatchCodeHook(void)
 {
+    u32 hook;
+
     if (!g_MENUPatchCodeAddress)
         return true;
 
+    hook = g_MENUPatchCodeOriginalSecond == 0xE1A09002u
+         ? (u32)PLUGIN_MENU_PatchCodeOld : (u32)PLUGIN_MENU_PatchCode;
+
     if (!PLUGIN_MENU_ReplaceHookPair(
-            g_MENUPatchCodeAddress,
-            0xE51FF004u,
-            (u32)PLUGIN_MENU_PatchCode,
-            0xE92D4FF0u,
-            0xE1A09002u))
-    {
+            g_MENUPatchCodeAddress, 0xE51FF004u, hook,
+            0xE92D4FF0u, g_MENUPatchCodeOriginalSecond))
         return false;
-    }
 
     g_MENUPatchCodeAddress = 0;
     g_MENUPatchCodeResume = 0;
+    g_MENUPatchCodeOriginalSecond = 0;
     return true;
 }
 
@@ -216,7 +229,9 @@ PLUGIN_CODE(MENU) static volatile u32 *PLUGIN_MENU_FindHomePatch(
         if (p[-6] != 0xE7872003u || p[-4] != 0xE0873003u ||
             p[-3] != 0xE5922000u || p[-2] != 0xE3120004u ||
             p[0] != 0xE5832004u || (p[1] & 0xFF000000u) != 0x0A000000u ||
-            p[2] != 0xE3A09001u || p[3] != 0xE3A08000u ||
+            (g_MENUPatchCodeOriginalSecond == 0xE1A09002u ?
+                (p[2] != 0xE3A09001u || p[3] != 0xE3A08000u) :
+                (p[2] != 0xE3A08001u || p[3] != 0xE3A09000u)) ||
             !PLUGIN_MENU_ReadR2Literal(p[-7], (u32)(p - 7), &firstValue) ||
             firstValue != 0xE3A00000u ||
             !PLUGIN_MENU_ReadR2Literal(p[-5], (u32)(p - 5), &configAddress) ||

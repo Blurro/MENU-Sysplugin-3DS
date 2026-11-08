@@ -11,10 +11,11 @@
 #define PLUGIN_BSS(id)    __attribute__((section(".pluginbss_" #id), used))
 
 extern void patchCode(
-    u64 progId,
-    u16 progVer,
     u8 *code,
     u32 size,
+    u32 codeSize,
+    u64 progId,
+    u16 progVer,
     u32 textSize,
     u32 roSize,
     u32 dataSize,
@@ -22,7 +23,11 @@ extern void patchCode(
     u32 dataAddress
 );
 // MENU trampoline for the original host patchCode() prologue.
-extern void PLUGIN_MENU_PatchCodeOriginal(
+extern void PLUGIN_MENU_PatchCodeOriginalNew(
+    u8 *code, u32 size, u32 codeSize, u64 progId, u16 progVer, u32 textSize,
+    u32 roSize, u32 dataSize, u32 roAddress, u32 dataAddress
+);
+extern void PLUGIN_MENU_PatchCodeOriginalOld(
     u64 progId, u16 progVer, u8 *code, u32 size, u32 textSize,
     u32 roSize, u32 dataSize, u32 roAddress, u32 dataAddress
 );
@@ -30,7 +35,6 @@ extern Result svcCloseHandle(Handle handle);
 extern Result plgldrInit(void);
 extern void svcSleepThread(s64 ns);
 extern Result svcSendSyncRequest(Handle handle);
-extern u32 menu_loader_patch_code_call;
 extern u32 menu_loader_home_patch;
 extern u32 menu_loader_createcodeset_call;
 extern u32 menu_loader_createprocess_call;
@@ -40,7 +44,7 @@ extern u32 menu_loader_plgldr_init_call;
 PLUGIN_DATA(MENU) void *pluginTable_MENU[] = {
     (void *)patchCode,
     (void *)svcCloseHandle,
-    (void *)&menu_loader_patch_code_call,
+    (void *)patchCode, // keep the old table slot, both versions have this symbol
     (void *)&menu_loader_home_patch,
     (void *)&menu_loader_createcodeset_call,
     (void *)&menu_loader_createprocess_call,
@@ -198,11 +202,11 @@ PLUGIN_CODE(MENU) bool PLUGIN_MENU_UnregisterHomePatch(
     return false;
 }
 
-PLUGIN_CODE(MENU) void PLUGIN_MENU_PatchCode(
-    u64 progId,
-    u16 progVer,
+PLUGIN_CODE(MENU) static void PLUGIN_MENU_BeginPatchCode(
     u8 *code,
     u32 size,
+    u64 progId,
+    u16 progVer,
     u32 textSize,
     u32 roSize,
     u32 dataSize,
@@ -210,7 +214,7 @@ PLUGIN_CODE(MENU) void PLUGIN_MENU_PatchCode(
     u32 dataAddress
 )
 {
-    // every title load gets a new ID, even unpatched titles. 0 is reserved for inactive patches
+    // keep the same launch counter for either Loader ABI
     g_MENULaunchEpoch++;
     if (!g_MENULaunchEpoch)
         g_MENULaunchEpoch = 1;
@@ -228,18 +232,28 @@ PLUGIN_CODE(MENU) void PLUGIN_MENU_PatchCode(
     g_MENUContext.codeSet = NULL;
     g_MENUContext.process = 0;
     g_MENUContextValid = true;
+}
 
-    PLUGIN_MENU_PatchCodeOriginal(
-        progId,
-        progVer,
-        code,
-        size,
-        textSize,
-        roSize,
-        dataSize,
-        roAddress,
-        dataAddress
-    );
+PLUGIN_CODE(MENU) void PLUGIN_MENU_PatchCode(
+    u8 *code, u32 size, u32 codeSize, u64 progId, u16 progVer,
+    u32 textSize, u32 roSize, u32 dataSize, u32 roAddress, u32 dataAddress
+)
+{
+    PLUGIN_MENU_BeginPatchCode(code, size, progId, progVer, textSize,
+                             roSize, dataSize, roAddress, dataAddress);
+    PLUGIN_MENU_PatchCodeOriginalNew(code, size, codeSize, progId, progVer,
+                                   textSize, roSize, dataSize, roAddress, dataAddress);
+}
+
+PLUGIN_CODE(MENU) void PLUGIN_MENU_PatchCodeOld(
+    u64 progId, u16 progVer, u8 *code, u32 size, u32 textSize,
+    u32 roSize, u32 dataSize, u32 roAddress, u32 dataAddress
+)
+{
+    PLUGIN_MENU_BeginPatchCode(code, size, progId, progVer, textSize,
+                             roSize, dataSize, roAddress, dataAddress);
+    PLUGIN_MENU_PatchCodeOriginalOld(progId, progVer, code, size, textSize,
+                                   roSize, dataSize, roAddress, dataAddress);
 }
 
 PLUGIN_CODE(MENU) void PLUGIN_MENU_DispatchHome(void)

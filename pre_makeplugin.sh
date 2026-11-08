@@ -23,6 +23,11 @@ import sys
 root = Path(sys.argv[1])
 patch = Path(sys.argv[2])
 makefile = root / 'sysmodules/rosalina/Makefile'
+# Nexus master on Windows can use CRLF. Normalize before the pinned SHA check
+# and the exact-zero-fuzz Makefile patch, which expect the canonical LF bytes.
+makefile_bytes = makefile.read_bytes()
+if b'\r\n' in makefile_bytes:
+    makefile.write_bytes(makefile_bytes.replace(b'\r\n', b'\n'))
 stock = '7358f39a996480c2cdb21dbb0ec2fdc57a71f2fde7e9a84158a008eaff840bab'
 prepared = '65c3378d08a2826b0843a239726c87dab416bc9d6b8f5e753702978f597ec949'
 digest = hashlib.sha256(makefile.read_bytes()).hexdigest()
