@@ -33,6 +33,7 @@ extern void PLUGIN_MENU_PatchCodeOld(
 extern void PLUGIN_MENU_HomeHook(void);
 extern void PLUGIN_MENU_CreateCodeSetHook(void);
 extern void PLUGIN_MENU_CreateProcessHook(void);
+extern void PLUGIN_MENU_CreateProcessHookNew(void);
 extern void PLUGIN_MENU_PlgldrCloseHook(void);
 extern void PLUGIN_MENU_PlgldrInitCallHook(void);
 extern void PLUGIN_MENU_svcFlushEntireDataCache(void);
@@ -347,10 +348,13 @@ PLUGIN_CODE(MENU) static volatile u32 *PLUGIN_MENU_FindCreateProcessPatch(
     {
         volatile u32 *p = anchor + i;
         u32 target;
+        // the release firmware stores the result on the stack; a fresh build keeps it in r5
+        bool stackResult = p[1] == 0xE58D0024u && p[2] == 0xE59D004Cu;
+        bool registerResult = p[1] == 0xE1A05000u &&
+            (p[2] & 0xFFFFF000u) == 0xE59D0000u;
         if (PLUGIN_MENU_DecodeBl(p[0], (u32)p, &target) &&
             target == MENU_HOST__svcCreateProcessAddress &&
-            p[1] == 0xE1A05000u &&
-            (p[2] & 0xFFFFF000u) == 0xE59D0000u &&
+            (stackResult || registerResult) &&
             (p[3] & 0xFF000000u) == 0xEB000000u)
         {
             if (found)
@@ -441,12 +445,15 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_InstallCreateProcessHook(void)
     g_MENUCreateProcessOriginal[1] = site[1];
     g_MENUCreateProcessReturn = address + 8u;
 
+    u32 hook = g_MENUCreateProcessOriginal[1] == 0xE58D0024u
+             ? (u32)PLUGIN_MENU_CreateProcessHookNew
+             : (u32)PLUGIN_MENU_CreateProcessHook;
     if (!PLUGIN_MENU_ReplaceHookPair(
             address,
             g_MENUCreateProcessOriginal[0],
             g_MENUCreateProcessOriginal[1],
             0xE51FF004u,
-            (u32)PLUGIN_MENU_CreateProcessHook))
+            hook))
     {
         g_MENUCreateProcessAddress = 0;
         g_MENUCreateProcessReturn = 0;
@@ -460,10 +467,13 @@ PLUGIN_CODE(MENU) static bool PLUGIN_MENU_RestoreCreateProcessHook(void)
     if (!g_MENUCreateProcessAddress)
         return true;
 
+    u32 hook = g_MENUCreateProcessOriginal[1] == 0xE58D0024u
+             ? (u32)PLUGIN_MENU_CreateProcessHookNew
+             : (u32)PLUGIN_MENU_CreateProcessHook;
     if (!PLUGIN_MENU_ReplaceHookPair(
             g_MENUCreateProcessAddress,
             0xE51FF004u,
-            (u32)PLUGIN_MENU_CreateProcessHook,
+            hook,
             g_MENUCreateProcessOriginal[0],
             g_MENUCreateProcessOriginal[1]))
     {

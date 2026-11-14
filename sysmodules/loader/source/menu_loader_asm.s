@@ -96,6 +96,24 @@ PLUGIN_MENU_CreateProcessHook:
     ldr     pc, [r12]
 
 .balign 4
+@ release 0.5.0 puts the result in the caller's stack slot instead of r5
+.global PLUGIN_MENU_CreateProcessHookNew
+.type   PLUGIN_MENU_CreateProcessHookNew, %function
+PLUGIN_MENU_CreateProcessHookNew:
+    push    {r0}
+    svc     0x75
+    ldr     r2, [sp]
+    str     r1, [r2]
+    add     sp, sp, #4
+    push    {r0-r4, lr}
+    mov     r1, r2
+    bl      PLUGIN_MENU_PostCreateProcess
+    pop     {r0-r4, lr}
+    str     r0, [sp, #0x24]
+    ldr     r12, =g_MENUCreateProcessReturn
+    ldr     pc, [r12]
+
+.balign 4
 @ hook: marker menu_loader_plgldr_exit_call, confirms call to symbol svcCloseHandle
 .global PLUGIN_MENU_PlgldrCloseHook
 .type   PLUGIN_MENU_PlgldrCloseHook, %function
