@@ -3091,7 +3091,11 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_PackPresenceVisitor(
     char path[ONLN_UPDATE_PATH_CAP];
     u32 size = 0;
     u32 offset = 0;
+    u32 packCount;
+    u16 matched[ONLN_PACK_MAX];
+    bool subsetOnly[ONLN_PACK_MAX];
     (void)stop;
+
     if (!entry || !scan || !scan->api ||
         !(entry->flags & MENU_ONLINE_DIR_NAME_COMPLETE) ||
         entry->attributes & FS_ATTRIBUTE_DIRECTORY ||
@@ -3099,35 +3103,66 @@ PLUGIN_CODE(onln) static Result PLUGIN_onln_PackPresenceVisitor(
         !PLUGIN_onln_MakePluginPath(path, sizeof(path), entry->name) ||
         R_FAILED(scan->api->getFileSize(path, &size)))
         return 0;
+
+    packCount = scan->pack ? 1u : g_packCount;
+    for (u32 p = 0; p < packCount; p++)
+    {
+        matched[p] = 0;
+        subsetOnly[p] = true;
+    }
+
+    // collect the whole physical stack before deciding whether it disables a pack
     while (offset < size)
     {
         Onln3nxHeader header;
         u32 metadataOffset;
         u32 nextOffset;
-        if (!PLUGIN_onln_Read3nxHeader(scan->api, path, size, offset, &header, &metadataOffset, &nextOffset) ||
-            nextOffset > size || (header.magic != ONLN_ROSALINA_MAGIC && header.magic != ONLN_LOADER_MAGIC))
-            break;
-        for (u32 p = 0; p < (scan->pack ? 1u : g_packCount); p++)
+        if (!PLUGIN_onln_Read3nxHeader(scan->api, path, size, offset,
+                &header, &metadataOffset, &nextOffset) ||
+            nextOffset <= offset || nextOffset > size ||
+            (header.magic != ONLN_ROSALINA_MAGIC && header.magic != ONLN_LOADER_MAGIC))
+            return 0;
+
+        for (u32 p = 0; p < packCount; p++)
         {
             const OnlnPack *pack = scan->pack ? scan->pack : &g_packs[p];
+            bool belongs = false;
             for (u32 i = 0; i < pack->componentCount; i++)
             {
-                if ((scan->pack && !scan->wanted[i]) ||
-                    pack->components[i].magic != header.magic || pack->components[i].plgid != header.plgid)
+                if (pack->components[i].magic != header.magic ||
+                    pack->components[i].plgid != header.plgid)
                     continue;
-                if (scan->pack)
-                {
-                    if (disabled) scan->foundDisabled[i] = true;
-                    else scan->foundEnabled[i] = true;
-                }
-                else
-                {
-                    if (disabled) g_packs[p].disabledComponents |= (u16)(1u << i);
-                    else g_packs[p].enabledComponents |= (u16)(1u << i);
-                }
+                belongs = true;
+                if (!scan->pack || scan->wanted[i])
+                    matched[p] |= (u16)(1u << i);
+                break;
             }
+            if (!belongs)
+                subsetOnly[p] = false;
         }
         offset = nextOffset;
+    }
+
+    for (u32 p = 0; p < packCount; p++)
+    {
+        // a disabled CTGP-7 stack sharing Blur must not disable PlayCoinz
+        if (disabled && !subsetOnly[p])
+            continue;
+        for (u32 i = 0; i < (scan->pack ? scan->pack : &g_packs[p])->componentCount; i++)
+        {
+            if (!(matched[p] & (u16)(1u << i)))
+                continue;
+            if (scan->pack)
+            {
+                if (disabled) scan->foundDisabled[i] = true;
+                else scan->foundEnabled[i] = true;
+            }
+            else
+            {
+                if (disabled) g_packs[p].disabledComponents |= (u16)(1u << i);
+                else g_packs[p].enabledComponents |= (u16)(1u << i);
+            }
+        }
     }
     return 0;
 }
